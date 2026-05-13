@@ -63,11 +63,41 @@ const defaultConfig = {
 
 let localConfig;
 
-try {
-  localConfig = JSON.parse(window.localStorage[CONFIG_KEY]);
-} catch (err) {
-  console.warn("Config read failed:", err);
-  localConfig = defaultConfig;
+function initConfig() {
+  try {
+    if (window.localStorage && window.localStorage[CONFIG_KEY]) {
+      localConfig = JSON.parse(window.localStorage[CONFIG_KEY]);
+      return;
+    }
+  } catch (err) {
+    console.warn("Config read failed:", err);
+  }
+  localConfig = structuredClone(defaultConfig);
+}
+
+initConfig();
+
+function tryPersistConfig() {
+  try {
+    if (!window.localStorage) return false;
+    const serialized = JSON.stringify(localConfig);
+    window.localStorage[CONFIG_KEY] = serialized;
+    return true;
+  } catch (err) {
+    if (err.name === "QuotaExceededError") {
+      console.warn("localStorage quota exceeded, clearing old data");
+      try {
+        window.localStorage.clear();
+        window.localStorage[CONFIG_KEY] = JSON.stringify(localConfig);
+        return true;
+      } catch (e2) {
+        console.error("Failed to persist config even after clearing:", e2);
+        return false;
+      }
+    }
+    console.error("Failed to persist config:", err);
+    return false;
+  }
 }
 
 export function configRead(key) {
@@ -78,38 +108,18 @@ export function configRead(key) {
       "with default value",
       defaultConfig[key],
     );
-    localConfig[key] = defaultConfig[key];
+    localConfig[key] = structuredClone(defaultConfig[key]);
   }
-
   return localConfig[key];
 }
 
 export function configWrite(key, value) {
   console.info("Setting key", key, "to", value);
   localConfig[key] = value;
-  window.localStorage[CONFIG_KEY] = JSON.stringify(localConfig);
+  tryPersistConfig();
   configChangeEmitter.dispatchEvent(
     new CustomEvent("configChange", { detail: { key, value } }),
   );
 }
 
-export const configChangeEmitter = {
-  listeners: {},
-  addEventListener(type, callback) {
-    if (!this.listeners[type]) this.listeners[type] = [];
-    this.listeners[type].push(callback);
-  },
-  removeEventListener(type, callback) {
-    if (!this.listeners[type]) return;
-    this.listeners[type] = this.listeners[type].filter((cb) => cb !== callback);
-  },
-  dispatchEvent(event) {
-    const type = event.type;
-    if (!this.listeners[type]) return;
-    this.listeners[type].forEach((cb) => {
-      try {
-        cb.call(this, event);
-      } catch (_) {}
-    });
-  },
-};
+export const configChangeEmitter = new EventTarget();

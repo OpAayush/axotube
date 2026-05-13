@@ -1,9 +1,10 @@
 import "./features/userAgentSpoofing.js";
 import "whatwg-fetch";
-import 'core-js/proposals/object-getownpropertydescriptors';
+import "core-js/proposals/object-getownpropertydescriptors";
 
-import './translations/index.js'
+import "./translations/index.js";
 import "./domrect-polyfill";
+
 import "./features/adblock.js";
 import "./features/sponsorblock.js";
 import "./ui/ui.js";

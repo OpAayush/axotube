@@ -1,109 +1,87 @@
-/*global navigate*/
-import '../spatial-navigation-polyfill.js';
-import css from './ui.css';
-import { configRead, configWrite } from '../config.js';
-import updateStyle from './theme.js';
-import { showToast } from './ytUI.js';
-import modernUI from './settings.js';
-import resolveCommand, { patchResolveCommand } from '../resolveCommand.js';
-import { pipToFullscreen } from '../features/pictureInPicture.js';
-import getCommandExecutor from './customCommandExecution.js';
-import { t } from 'i18next';
+import css from "./ui.css";
+import { configRead, configChangeEmitter } from "../config.js";
+import updateStyle from "./theme.js";
+import { showToast } from "./ytUI.js";
+import modernUI from "./settings.js";
+import resolveCommand, { patchResolveCommand } from "../resolveCommand.js";
+import { pipToFullscreen } from "../features/pictureInPicture.js";
+import getCommandExecutor from "./customCommandExecution.js";
+import { t } from "i18next";
 
-// It just works, okay?
-const interval = setInterval(() => {
-  const videoElement = document.querySelector('video');
-  if (videoElement) {
-    execute_once_dom_loaded();
-    patchResolveCommand();
-    clearInterval(interval);
-  }
-}, 250);
-
+let initialized = false;
 let keyTimeout = null;
 
 function execute_once_dom_loaded() {
+  if (initialized) return;
+  initialized = true;
 
-  // Add CSS to head.
-
-  const existingStyle = document.querySelector('style[nonce]');
+  const existingStyle = document.querySelector("style[nonce]");
   if (existingStyle) {
     existingStyle.textContent += css;
   } else {
-    const style = document.createElement('style');
+    const style = document.createElement("style");
     style.textContent = css;
     document.head.appendChild(style);
   }
 
-  // Fix UI issues.
-  const ui = configRead('enableFixedUI');
+  const ui = configRead("enableFixedUI");
   if (ui) {
     try {
-      window.tectonicConfig.featureSwitches.isLimitedMemory = false;
-      window.tectonicConfig.clientData.legacyApplicationQuality = 'full-animation';
-      window.tectonicConfig.featureSwitches.enableAnimations = true;
-      window.tectonicConfig.featureSwitches.enableOnScrollLinearAnimation = true;
-      window.tectonicConfig.featureSwitches.enableListAnimations = true;
-    } catch (e) { }
+      if (window.tectonicConfig) {
+        window.tectonicConfig.featureSwitches.isLimitedMemory = false;
+        window.tectonicConfig.clientData.legacyApplicationQuality =
+          "full-animation";
+        window.tectonicConfig.featureSwitches.enableAnimations = true;
+        window.tectonicConfig.featureSwitches.enableOnScrollLinearAnimation = true;
+        window.tectonicConfig.featureSwitches.enableListAnimations = true;
+      }
+    } catch (e) {
+      console.warn("Could not apply UI fixes:", e);
+    }
   }
 
-  // We handle key events ourselves.
-  window.__spatialNavigation__.keyMode = 'NONE';
+  var ARROW_KEY_CODE = { 37: "left", 38: "up", 39: "right", 40: "down" };
 
-  var ARROW_KEY_CODE = { 37: 'left', 38: 'up', 39: 'right', 40: 'down' };
-
-  var uiContainer = document.createElement('div');
-  uiContainer.classList.add('ytaf-ui-container');
-  uiContainer.style['display'] = 'none';
-  uiContainer.setAttribute('tabindex', 0);
-  uiContainer.addEventListener(
-    'focus',
-    () => console.info('uiContainer focused!'),
-    true
-  );
-  uiContainer.addEventListener(
-    'blur',
-    () => console.info('uiContainer blured!'),
-    true
-  );
+  var uiContainer = document.createElement("div");
+  uiContainer.classList.add("ytaf-ui-container");
+  uiContainer.style["display"] = "none";
+  uiContainer.setAttribute("tabindex", 0);
 
   uiContainer.addEventListener(
-    'keydown',
+    "keydown",
     (evt) => {
-      console.info('uiContainer key event:', evt.type, evt.keyCode, evt);
       if (evt.keyCode !== 404 && evt.keyCode !== 172) {
         if (evt.keyCode in ARROW_KEY_CODE) {
-          navigate(ARROW_KEY_CODE[evt.keyCode]);
+          try {
+            window.navigate?.(ARROW_KEY_CODE[evt.keyCode]);
+          } catch (e) {
+            console.warn("Navigation failed:", e);
+          }
         } else if (evt.keyCode === 13 || evt.keyCode === 32) {
-          // "OK" button
-          console.log('OK button pressed');
-          const focusedElement = document.querySelector(':focus');
-          if (focusedElement.type === 'checkbox') {
+          const focusedElement = document.querySelector(":focus");
+          if (focusedElement?.type === "checkbox") {
             focusedElement.checked = !focusedElement.checked;
-            focusedElement.dispatchEvent(new Event('change'));
+            focusedElement.dispatchEvent(new Event("change"));
           }
           evt.preventDefault();
           evt.stopPropagation();
           return;
-        } else if (evt.keyCode === 27 && document.querySelector(':focus').type !== 'text') {
-          // Back button
-          uiContainer.style.display = 'none';
+        } else if (
+          evt.keyCode === 27 &&
+          document.querySelector(":focus")?.type !== "text"
+        ) {
+          uiContainer.style.display = "none";
           uiContainer.blur();
-        } else if (document.querySelector(':focus').type === 'text' && evt.keyCode === 27) {
-          const focusedElement = document.querySelector(':focus');
+        } else if (
+          document.querySelector(":focus")?.type === "text" &&
+          evt.keyCode === 27
+        ) {
+          const focusedElement = document.querySelector(":focus");
           focusedElement.value = focusedElement.value.slice(0, -1);
-        }
-
-
-        if (evt.key === 'Enter' || evt.Uc?.key === 'Enter') {
-          // If the focused element is a text input, emit a change event.
-          if (document.querySelector(':focus').type === 'text') {
-            document.querySelector(':focus').dispatchEvent(new Event('change'));
-          }
         }
       }
     },
-    true
+    true,
   );
 
   try {
@@ -113,117 +91,180 @@ function execute_once_dom_loaded() {
 <label for="__routeColor">Main Content Color: <input type="text" id="__routeColor"/></label>
 <div><small>Sponsor segments skipping - https://sponsor.ajay.app</small></div>
 `;
-    document.querySelector('body').appendChild(uiContainer);
+    document.querySelector("body").appendChild(uiContainer);
 
-    uiContainer.querySelector('#__barColor').value = configRead('focusContainerColor');
-    uiContainer.querySelector('#__barColor').addEventListener('change', (evt) => {
-      configWrite('focusContainerColor', evt.target.value);
-      updateStyle();
-    });
+    uiContainer.querySelector("#__barColor").value = configRead(
+      "focusContainerColor",
+    );
+    uiContainer
+      .querySelector("#__barColor")
+      .addEventListener("change", (evt) => {
+        try {
+          configRead("focusContainerColor");
+        } catch (e) {
+          console.error("Color save failed:", e);
+        }
+      });
 
-    uiContainer.querySelector('#__routeColor').value = configRead('routeColor');
-    uiContainer.querySelector('#__routeColor').addEventListener('change', (evt) => {
-      configWrite('routeColor', evt.target.value);
-      updateStyle();
-    });
-  } catch (e) { }
+    uiContainer.querySelector("#__routeColor").value = configRead("routeColor");
+    uiContainer
+      .querySelector("#__routeColor")
+      .addEventListener("change", (evt) => {
+        try {
+          configRead("routeColor");
+        } catch (e) {
+          console.error("Color save failed:", e);
+        }
+      });
+  } catch (e) {
+    console.warn("Could not create UI container:", e);
+  }
 
   var eventHandler = (evt) => {
-    // We handle key events ourselves.
-    console.info(
-      'Key event:',
-      evt.type,
-      evt.keyCode,
-      evt.keyCode,
-      evt.defaultPrevented
-    );
-    if (configRead('enableScreenDimming')) {
+    if (configRead("enableScreenDimming")) {
       if (keyTimeout) {
         clearTimeout(keyTimeout);
       }
-      document.getElementById('container').style.setProperty('opacity', '1', 'important');
-      keyTimeout = setTimeout(() => {
-        const videoPlayer = document.querySelector('.html5-video-player');
-        const playerStateObject = videoPlayer.getPlayerStateObject();
-        if (playerStateObject.isPlaying) return;
-        document.getElementById('container').style.setProperty('opacity', (1 - configRead('dimmingOpacity')).toString(), 'important');
-      }, configRead('dimmingTimeout') * 1000);
+      const container = document.getElementById("container");
+      if (container) {
+        container.style.setProperty("opacity", "1", "important");
+      }
+      keyTimeout = setTimeout(
+        () => {
+          const videoPlayer = document.querySelector(".html5-video-player");
+          if (!videoPlayer) return;
+          const playerStateObject = videoPlayer.getPlayerStateObject?.();
+          if (playerStateObject?.isPlaying) return;
+          const container = document.getElementById("container");
+          if (container) {
+            container.style.setProperty(
+              "opacity",
+              (1 - configRead("dimmingOpacity")).toString(),
+              "important",
+            );
+          }
+        },
+        configRead("dimmingTimeout") * 1000,
+      );
     }
+
     if (evt.keyCode == 403) {
-      console.info('Taking over!');
       evt.preventDefault();
       evt.stopPropagation();
-      if (evt.type === 'keydown') {
+      if (evt.type === "keydown") {
         try {
-          if (uiContainer.style.display === 'none') {
-            console.info('Showing and focusing!');
-            uiContainer.style.display = 'block';
+          if (uiContainer.style.display === "none") {
+            uiContainer.style.display = "block";
             uiContainer.focus();
           } else {
-            console.info('Hiding!');
-            uiContainer.style.display = 'none';
+            uiContainer.style.display = "none";
             uiContainer.blur();
           }
-        } catch (e) { }
+        } catch (e) {
+          console.warn("UI container toggle failed:", e);
+        }
       }
       return false;
     } else if (evt.keyCode == 404) {
-      if (evt.type === 'keydown') {
-        modernUI();
+      if (evt.type === "keydown") {
+        try {
+          modernUI();
+        } catch (e) {
+          console.error("Settings open failed:", e);
+        }
       }
     } else if (evt.keyCode == 39) {
-      // Right key, for PiP
-      if (evt.type === 'keydown') {
-        if (document.querySelector('ytlr-search-text-box > .zylon-focus') && window.isPipPlaying) {
-          const ytlrPlayer = document.querySelector('ytlr-player');
-          ytlrPlayer.style.setProperty('background-color', 'rgb(0, 0, 0)');
-          pipToFullscreen();
+      if (evt.type === "keydown") {
+        if (
+          document.querySelector("ytlr-search-text-box > .zylon-focus") &&
+          window.isPipPlaying
+        ) {
+          try {
+            const ytlrPlayer = document.querySelector("ytlr-player");
+            if (ytlrPlayer) {
+              ytlrPlayer.style.setProperty("background-color", "rgb(0, 0, 0)");
+            }
+            pipToFullscreen();
+          } catch (e) {
+            console.warn("PiP exit failed:", e);
+          }
         }
       }
-    };
+    }
     return true;
-  }
+  };
 
-  // Red, Green, Yellow, Blue
-  // 403, 404, 405, 406
-  // ---, 172, 170, 191
-  document.addEventListener('keydown', eventHandler, true);
-  document.addEventListener('keypress', eventHandler, true);
-  document.addEventListener('keyup', eventHandler, true);
-  if (configRead('showWelcomeToast')) {
-    setTimeout(() => {
-      showToast(t('welcomeMsg.title'), t('welcomeMsg.subtitle'));
-    }, 2000);
-  }
+  document.addEventListener("keydown", eventHandler, true);
+  document.addEventListener("keypress", eventHandler, true);
+  document.addEventListener("keyup", eventHandler, true);
 
-  if (configRead('reloadHomeOnStartup')) {
-    if (configRead('launchToOnStartup')) {
-      resolveCommand(JSON.parse(configRead('launchToOnStartup')));
-    } else {
-      resolveCommand({
-        signalAction: {
-          signal: 'SOFT_RELOAD_PAGE'
-        }
-      });
+  setTimeout(() => {
+    if (configRead("showWelcomeToast")) {
+      showToast(t("welcomeMsg.title"), t("welcomeMsg.subtitle"));
+    }
+  }, 1000);
+
+  const launchData = configRead("launchToOnStartup");
+  if (launchData) {
+    try {
+      resolveCommand(JSON.parse(launchData));
+    } catch (e) {
+      console.warn("Launch command failed:", e);
     }
   }
 
   const commandExecutor = getCommandExecutor();
   if (commandExecutor) {
-    commandExecutor.executeFunction(new commandExecutor.commandFunction('reloadGuideAction'));
+    try {
+      commandExecutor.executeFunction(
+        new commandExecutor.commandFunction("reloadGuideAction"),
+      );
+    } catch (e) {
+      console.warn("Guide reload failed:", e);
+    }
   }
 
-  // Fix UI issues, again. Love, Googol.
-
-  if (configRead('enableFixedUI')) {
+  if (configRead("enableFixedUI")) {
     try {
-      const observer = new MutationObserver((_, _2) => {
+      const observer = new MutationObserver(() => {
         const body = document.body;
-        if (body.classList.contains('app-quality-root')) {
-          body.classList.remove('app-quality-root');
+        if (body?.classList.contains("app-quality-root")) {
+          body.classList.remove("app-quality-root");
         }
       });
-      observer.observe(document.body, { attributes: true, childList: false, subtree: false });
-    } catch (e) { }
+      observer.observe(document.body, { attributes: true });
+    } catch (e) {
+      console.warn("UI quality observer failed:", e);
+    }
+  }
+
+  patchResolveCommand();
+}
+
+function checkInitialization() {
+  if (initialized) return;
+
+  if (
+    document.readyState === "complete" ||
+    document.readyState === "interactive"
+  ) {
+    const videoElement = document.querySelector("video");
+    if (videoElement) {
+      execute_once_dom_loaded();
+      return;
+    }
   }
 }
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", checkInitialization);
+}
+
+const initInterval = setInterval(() => {
+  checkInitialization();
+  if (initialized) {
+    clearInterval(initInterval);
+  }
+}, 100);
+
+configChangeEmitter.addEventListener("configChange", updateStyle);

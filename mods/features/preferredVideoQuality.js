@@ -1,101 +1,142 @@
 import { configRead, configChangeEmitter } from "../config.js";
 
 const SELECTORS = {
-    PLAYER: '.html5-video-player',
+  PLAYER: ".html5-video-player",
 };
 
 const EVENTS = {
-    YT_STATE_CHANGE: 'onStateChange',
-    CONFIG_CHANGE: 'configChange',
+  YT_STATE_CHANGE: "onStateChange",
+  CONFIG_CHANGE: "configChange",
 };
 
 const CONFIG_KEYS = {
-    QUALITY: 'preferredVideoQuality',
+  QUALITY: "preferredVideoQuality",
 };
 
 class PreferredQualityHandler {
-    #player = null;
-    #attachTimeout = null;
-    #lastVideoId = null;
-    #hasAppliedQuality = false;
+  #player = null;
+  #attachTimeout = null;
+  #lastVideoId = null;
+  #hasAppliedQuality = false;
 
-    constructor() {
-        this.init();
+  constructor() {
+    this.init();
+  }
+
+  init() {
+    this.#pollForPlayer();
+    this.#setupConfigListener();
+  }
+
+  #pollForPlayer() {
+    clearTimeout(this.#attachTimeout);
+
+    const playerElement = document.querySelector(SELECTORS.PLAYER);
+
+    if (!playerElement) {
+      this.#attachTimeout = setTimeout(() => this.#pollForPlayer(), 100);
+      return;
     }
 
-    init() {
-        this.#pollForPlayer();
-        this.#setupConfigListener();
+    this.#player = playerElement;
+
+    try {
+      this.#player.addEventListener(
+        EVENTS.YT_STATE_CHANGE,
+        this.#handleStateChange,
+      );
+    } catch (e) {
+      console.warn("Could not attach state change listener:", e);
     }
 
-    #pollForPlayer() {
-        clearTimeout(this.#attachTimeout);
+    this.#handleStateChange();
+  }
 
-        const playerElement = document.querySelector(SELECTORS.PLAYER);
+  #setupConfigListener() {
+    configChangeEmitter.addEventListener(EVENTS.CONFIG_CHANGE, (ev) => {
+      if (ev.detail?.key === CONFIG_KEYS.QUALITY) {
+        this.#applyQuality();
+      }
+    });
+  }
 
-        if (!playerElement) {
-            this.#attachTimeout = setTimeout(() => this.#pollForPlayer(), 100);
-            return;
-        }
+  #handleStateChange = () => {
+    try {
+      const state = this.#player?.getPlayerStateObject?.();
+      const videoData = this.#player?.getVideoData?.();
+      const videoId = videoData?.video_id;
 
-        this.#player = playerElement;
+      if (videoId !== this.#lastVideoId) {
+        this.#lastVideoId = videoId;
+        this.#hasAppliedQuality = false;
+      }
 
-        this.#player.addEventListener(EVENTS.YT_STATE_CHANGE, this.#handleStateChange);
-
-        this.#handleStateChange();
+      const isShorts = Object.values(this.#player.getVideoStats?.() || {}).find(
+        (a) => a && a === "shortspage",
+      );
+      if (state?.isPlaying && !this.#hasAppliedQuality && !isShorts) {
+        this.#applyQuality();
+        this.#hasAppliedQuality = true;
+      }
+    } catch (e) {
+      console.warn("State change handler failed:", e);
     }
+  };
 
-    #setupConfigListener() {
-        configChangeEmitter.addEventListener(EVENTS.CONFIG_CHANGE, (ev) => {
-            if (ev.detail?.key === CONFIG_KEYS.QUALITY) {
-                this.#applyQuality();
-            }
-        });
+  #applyQuality() {
+    const preferredQuality = configRead(CONFIG_KEYS.QUALITY);
+    if (!preferredQuality || preferredQuality === "auto" || !this.#player)
+      return;
+
+    try {
+      const quality = this.#determineQuality(preferredQuality);
+
+      if (quality) {
+        this.#player.setPlaybackQualityRange(quality, quality);
+      }
+    } catch (e) {
+      console.warn("[PreferredQuality] Failed to apply quality:", e);
     }
+  }
 
-    #handleStateChange = () => {
-        const state = this.#player?.getPlayerStateObject?.();
-        const videoData = this.#player?.getVideoData?.();
-        const videoId = videoData?.video_id;
+  #determineQuality(preference) {
+    try {
+      const availableQualities = this.#player.getAvailableQualityData?.();
+      if (
+        !availableQualities ||
+        !Array.isArray(availableQualities) ||
+        availableQualities.length === 0
+      ) {
+        return null;
+      }
 
-        if (videoId !== this.#lastVideoId) {
-            this.#lastVideoId = videoId;
-            this.#hasAppliedQuality = false;
-        }
+      const getQualityValue = (label) => parseInt(label, 10) || 0;
+      const targetValue = getQualityValue(preference);
 
-        const isShorts = Object.values(this.#player.getVideoStats()).find(a => a && a === 'shortspage');
-        if (state?.isPlaying && !this.#hasAppliedQuality && !isShorts) {
-            this.#applyQuality();
-            this.#hasAppliedQuality = true;
-        }
-    };
+      const match = availableQualities.find(
+        (q) => getQualityValue(q.qualityLabel) === targetValue,
+      );
 
-    #applyQuality() {
-        const preferredQuality = configRead(CONFIG_KEYS.QUALITY);
-        if (!preferredQuality || preferredQuality === 'auto' || !this.#player) return;
+      if (match) {
+        return match.quality;
+      }
 
-        try {
-            const quality = this.#determineQuality(preferredQuality);
+      const sorted = availableQualities.slice().sort((a, b) => {
+        const aVal = getQualityValue(a.qualityLabel);
+        const bVal = getQualityValue(b.qualityLabel);
+        return Math.abs(aVal - targetValue) - Math.abs(bVal - targetValue);
+      });
 
-            if (quality) {
-              this.#player.setPlaybackQualityRange(quality, quality)
-            }
-        } catch (e) {
-            console.warn('[PreferredQuality] Failed to apply quality:', e);
-        }
+      return sorted[0]?.quality || null;
+    } catch (e) {
+      console.warn("[PreferredQuality] Quality determination failed:", e);
+      return null;
     }
-
-    #determineQuality(preference) {
-        const availableQualities = this.#player.getAvailableQualityData();
-        if (!availableQualities?.length) return 'highres';
-
-        const getQualityValue = (label) => parseInt(label, 10) || 0;
-        const targetValue = getQualityValue(preference);
-
-        const match = availableQualities.find(q => getQualityValue(q.qualityLabel) === targetValue);
-
-        return match ? match.quality : 'highres';
-    }
+  }
 }
 
-window.preferredVideoQualityHandler = new PreferredQualityHandler();
+try {
+  window.preferredVideoQualityHandler = new PreferredQualityHandler();
+} catch (e) {
+  console.error("PreferredQualityHandler initialization failed:", e);
+}
