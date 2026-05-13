@@ -3,6 +3,7 @@ import { enablePip } from './features/pictureInPicture.js';
 import modernUI, { optionShow } from './ui/settings.js';
 import { speedSettings } from './ui/speedUI.js';
 import { showToast, buttonItem } from './ui/ytUI.js';
+import checkForUpdates from './features/updater.js';
 
 export default function resolveCommand(cmd, _) {
     // resolveCommand function is pretty OP, it can do from opening modals, changing client settings and way more.
@@ -97,15 +98,65 @@ export function patchResolveCommand() {
                             { icon: 'CLEAR_COOKIES' }, [
                             {
                                 customAction: {
-                                    action: 'ENTER_PIP'
+                                    action: 'ENTER_MP'
                                 }
                             }
                         ])
                     );
+
+                    if (window.h5vcc && window.h5vcc.tizentube && window.h5vcc.tizentube?.HasSystemFeature('android.software.picture_in_picture')) {
+                        cmd.openPopupAction.popup.overlaySectionRenderer.overlay.overlayTwoPanelRenderer.actionPanel.overlayPanelRenderer.content.overlayPanelItemListRenderer.items.splice(3, 0,
+                            buttonItem(
+                                { title: 'Picture in Picture' },
+                                { icon: 'PIP' }, [
+                                {
+                                    customAction: {
+                                        action: 'ENTER_PIP'
+                                    }
+                                },
+                                {
+                                    signalAction: {
+                                         signal: 'POPUP_BACK'
+                                    }
+                                }
+                            ])
+                        );
+                    }
                 } else if (cmd?.watchEndpoint?.videoId) {
                     window.isPipPlaying = false;
                     const ytlrPlayerContainer = document.querySelector('ytlr-player-container');
                     ytlrPlayerContainer.style.removeProperty('z-index');
+                }
+
+                if (cmd.customAction) return window._yttv[key].instance.resolveCommand(cmd, _);
+
+                if (cmd.commandExecutorCommand && cmd.commandExecutorCommand.commands) {
+                    for (const command of cmd.commandExecutorCommand.commands) {
+                        if (command.customAction) {
+                            customAction(command.customAction.action, command.customAction.parameters);
+                        } else if (command.signalAction?.customAction) {
+                            customAction(command.signalAction.customAction.action, command.signalAction.customAction.parameters);
+                        } else if (command.showEngagementPanelEndpoint?.customAction) {
+                            customAction(command.showEngagementPanelEndpoint.customAction.action, command.showEngagementPanelEndpoint.customAction.parameters);
+                        } else if (command.playlistEditEndpoint?.customAction) {
+                            customAction(command.playlistEditEndpoint.customAction.action, command.playlistEditEndpoint.customAction.parameters);
+                        } else {
+                            window._yttv[key].instance.resolveCommand(command, _);
+                        }
+                    }
+                    return true;
+                }
+
+                if (cmd?.requestAccountSelectorCommand
+                    && cmd.requestAccountSelectorCommand?.identityActionContext?.eventTrigger === 'ACCOUNT_EVENT_TRIGGER_ON_EXIT') {
+                    if (!configRead('enableWhosWatchingMenuOnAppExit')) {
+                        ogResolve.call(this, {
+                            signalAction: {
+                                signal: 'EXIT_APP'
+                            }
+                        });
+                        return false;
+                    }
                 }
 
                 return ogResolve.call(this, cmd, _);
@@ -148,8 +199,11 @@ function customAction(action, parameters) {
             const speed = Number(parameters);
             document.querySelector('video').playbackRate = speed;
             break;
-        case 'ENTER_PIP':
+        case 'ENTER_MP':
             enablePip();
+            break;
+        case 'ENTER_PIP':
+            window.h5vcc.tizentube.EnterPIP();
             break;
         case 'SHOW_TOAST':
             showToast('TizenTube', parameters);
@@ -161,6 +215,9 @@ function customAction(action, parameters) {
         case 'CLEAR_QUEUE':
             window.queuedVideos.videos = [];
             showToast('TizenTube', 'Video queue cleared.');
+            break;
+        case 'CHECK_FOR_UPDATES':
+            checkForUpdates(true);
             break;
     }
 }

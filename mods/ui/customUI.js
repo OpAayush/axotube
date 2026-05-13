@@ -2,6 +2,7 @@
 
 import { extractAssignedFunctions } from "../utils/ASTParser.js";
 import { configRead } from "../config.js";
+import { ButtonRenderer } from "./ytUI.js";
 
 function applyPatches() {
     if (!window._yttv) return setTimeout(applyPatches, 250);
@@ -48,11 +49,11 @@ function applyPatches() {
             "button": {
                 "buttonRenderer": ButtonRenderer(
                     false,
-                    'Mini Player',
+                    configRead('enableSwapMPWithPIP') ? 'Picture in Picture' : 'Mini Player',
                     'CLEAR_COOKIES',
                     {
                         customAction: {
-                            action: 'ENTER_PIP'
+                            action: configRead('enableSwapMPWithPIP') ? 'ENTER_PIP' : 'ENTER_MP',
                         }
                     }
                 )
@@ -66,11 +67,14 @@ function applyPatches() {
         if (!settingActionGroup) return inst;
 
         const origSettingActionGroup = inst[settingActionGroup];
-        inst[settingActionGroup] = function () {
-            const res = origSettingActionGroup.apply(this, arguments);
-            res.find(item => item.type === 'TRANSPORT_CONTROLS_BUTTON_TYPE_PIP') || res.splice(1, 0, pipCommand);
-            return res;
-        };
+        if (configRead('enableMPButton')) {
+            inst[settingActionGroup] = function () {
+                const res = origSettingActionGroup.apply(this, arguments);
+                const idx = res.findIndex(item => item.type === 'TRANSPORT_CONTROLS_BUTTON_TYPE_PLAYBACK_SETTINGS');
+                res.find(item => item.type === 'TRANSPORT_CONTROLS_BUTTON_TYPE_PIP') || res.splice(idx, 0, pipCommand);
+                return res;
+            };
+        }
 
         const previousButtonName = functions.find(func => {
             if (func.rhs.includes('skipNextButton')) {
@@ -94,7 +98,7 @@ function applyPatches() {
 
         const engagementActionButton = functions.find(func => func.rhs.includes('props.data.engagementActions')).left.split('.')[1];
 
-        if (engagementActionButton) {
+        if (engagementActionButton && configRead('enableSpeedControlsButton')) {
             const origEngagementActionButton = inst[engagementActionButton];
             inst[engagementActionButton] = function () {
                 const res = origEngagementActionButton.apply(this, arguments);
@@ -165,24 +169,6 @@ function applyPatches() {
         YtlrPlayerActionsContainer.prototype = origMethod.prototype;
         window._yttv[methods[0]] = YtlrPlayerActionsContainer;
     }
-}
-
-function ButtonRenderer(disabled, text, iconType, command) {
-    return {
-        isDisabled: disabled,
-        text: {
-            runs: [
-                {
-                    text: text
-                }
-            ]
-        },
-        icon: {
-            iconType
-        },
-        command: command,
-        trackingParams: null
-    };
 }
 
 
