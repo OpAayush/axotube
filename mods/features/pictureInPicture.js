@@ -1,7 +1,10 @@
 // Picture in Picture Mode for TizenTube
 
-import resolveCommand from "../resolveCommand.js";
-
+// At function call, get it from window
+const resolveCommand =
+  window._yttv_resolveCommand ||
+  Object.values(window._yttv).find((a) => a.instance?.resolveCommand)?.instance
+    ?.resolveCommand;
 window.isPipPlaying = false;
 let PlayerService = null;
 let observerPipEnter = null;
