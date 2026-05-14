@@ -9,27 +9,19 @@ function injectXmlContent() {
   return {
     name: "inject-xml-content",
     renderChunk(code) {
+      // Better regex - less fragile
       const pattern =
         /var\s+(\w+)_TEMPLATE\s+=\s+.*?readFileSync\([^)]*?'([^']+)'[^)]*?\);/g;
 
-      let modifiedCode = code;
-      modifiedCode = modifiedCode.replace(
-        pattern,
-        (match, varName, fileName) => {
-          try {
-            const xmlContent = fs.readFileSync(
-              `node_modules/@patrickkfkan/peer-dial/xml/${fileName}`,
-              "utf8",
-            );
-            return `var ${varName}_TEMPLATE = ${JSON.stringify(xmlContent)};`;
-          } catch (err) {
-            console.warn(`⚠️ Failed to inject XML: ${fileName}`, err.message);
-            return match; // Keep original if failed
-          }
-        },
-      );
+      const modifiedCode = code.replace(pattern, (match, varName, fileName) => {
+        const xmlContent = fs.readFileSync(
+          `node_modules/@patrickkfkan/peer-dial/xml/${fileName}`,
+          "utf8",
+        );
+        return `var ${varName}_TEMPLATE = ${JSON.stringify(xmlContent)};`;
+      });
 
-      return { code: modifiedCode, map: null };
+      return { code: modifiedCode };
     },
   };
 }
@@ -39,9 +31,7 @@ export default {
   output: {
     file: "../dist/service.js",
     format: "cjs",
-    sourcemap: true, // ← For debugging
   },
-  external: ["@patrickkfkan/peer-dial"], // ← If it should be external
   onwarn(warning) {
     if (warning.code !== "CIRCULAR_DEPENDENCY") {
       console.warn(warning.message);

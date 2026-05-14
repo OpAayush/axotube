@@ -1,28 +1,27 @@
 'use strict';
 
-var require$$0$a = require('@patrickkfkan/peer-dial');
-var require$$0$3 = require('path');
-var require$$0$4 = require('tty');
-var require$$1$1 = require('util');
+var require$$0$3 = require('crypto');
+var require$$0$5 = require('dgram');
+var require$$1$1 = require('events');
+var require$$2$2 = require('os');
+var require$$0$4 = require('util');
 var require$$1$2 = require('fs');
-var require$$4$1 = require('net');
-var require$$0$5 = require('events');
-var require$$1$3 = require('stream');
-var require$$3$1 = require('zlib');
-var require$$0$6 = require('buffer');
+var require$$1$3 = require('path');
+var require$$7$1 = require('http');
+var require$$8 = require('url');
 var require$$1$4 = require('string_decoder');
-var require$$8 = require('querystring');
-var require$$0$7 = require('url');
-var require$$0$8 = require('http');
-var require$$0$9 = require('crypto');
+var require$$4$1 = require('timers');
+var require$$1$5 = require('assert');
+var require$$0$6 = require('tty');
+var require$$4$2 = require('net');
+var require$$1$6 = require('stream');
+var require$$3$2 = require('zlib');
+var require$$0$7 = require('buffer');
+var require$$8$1 = require('querystring');
 
 var commonjsGlobal = typeof globalThis !== 'undefined' ? globalThis : typeof window !== 'undefined' ? window : typeof global !== 'undefined' ? global : typeof self !== 'undefined' ? self : {};
 
 var service = {};
-
-var express$2 = {exports: {}};
-
-var bodyParser = {exports: {}};
 
 function _typeof(o) {
   "@babel/helpers - typeof";
@@ -34,11 +33,9031 @@ function _typeof(o) {
   }, _typeof(o);
 }
 
+var peerDial$1 = {};
+
+// Unique ID creation requires a high quality random # generator.  In node.js
+// this is pretty straight-forward - we use the crypto API.
+
+var crypto$1 = require$$0$3;
+var rng$2 = function nodeRNG() {
+  return crypto$1.randomBytes(16);
+};
+
+/**
+ * Convert array of 16 byte values to UUID string format of the form:
+ * XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+ */
+var byteToHex = [];
+for (var i = 0; i < 256; ++i) {
+  byteToHex[i] = (i + 0x100).toString(16).substr(1);
+}
+function bytesToUuid$2(buf, offset) {
+  var i = offset || 0;
+  var bth = byteToHex;
+  // join used to fix memory issue caused by concatenation: https://bugs.chromium.org/p/v8/issues/detail?id=3175#c4
+  return [bth[buf[i++]], bth[buf[i++]], bth[buf[i++]], bth[buf[i++]], '-', bth[buf[i++]], bth[buf[i++]], '-', bth[buf[i++]], bth[buf[i++]], '-', bth[buf[i++]], bth[buf[i++]], '-', bth[buf[i++]], bth[buf[i++]], bth[buf[i++]], bth[buf[i++]], bth[buf[i++]], bth[buf[i++]]].join('');
+}
+var bytesToUuid_1 = bytesToUuid$2;
+
+var rng$1 = rng$2;
+var bytesToUuid$1 = bytesToUuid_1;
+
+// **`v1()` - Generate time-based UUID**
+//
+// Inspired by https://github.com/LiosK/UUID.js
+// and http://docs.python.org/library/uuid.html
+
+var _nodeId;
+var _clockseq;
+
+// Previous uuid creation time
+var _lastMSecs = 0;
+var _lastNSecs = 0;
+
+// See https://github.com/uuidjs/uuid for API details
+function v1$1(options, buf, offset) {
+  var i = buf && offset || 0;
+  var b = buf || [];
+  options = options || {};
+  var node = options.node || _nodeId;
+  var clockseq = options.clockseq !== undefined ? options.clockseq : _clockseq;
+
+  // node and clockseq need to be initialized to random values if they're not
+  // specified.  We do this lazily to minimize issues related to insufficient
+  // system entropy.  See #189
+  if (node == null || clockseq == null) {
+    var seedBytes = rng$1();
+    if (node == null) {
+      // Per 4.5, create and 48-bit node id, (47 random bits + multicast bit = 1)
+      node = _nodeId = [seedBytes[0] | 0x01, seedBytes[1], seedBytes[2], seedBytes[3], seedBytes[4], seedBytes[5]];
+    }
+    if (clockseq == null) {
+      // Per 4.2.2, randomize (14 bit) clockseq
+      clockseq = _clockseq = (seedBytes[6] << 8 | seedBytes[7]) & 0x3fff;
+    }
+  }
+
+  // UUID timestamps are 100 nano-second units since the Gregorian epoch,
+  // (1582-10-15 00:00).  JSNumbers aren't precise enough for this, so
+  // time is handled internally as 'msecs' (integer milliseconds) and 'nsecs'
+  // (100-nanoseconds offset from msecs) since unix epoch, 1970-01-01 00:00.
+  var msecs = options.msecs !== undefined ? options.msecs : new Date().getTime();
+
+  // Per 4.2.1.2, use count of uuid's generated during the current clock
+  // cycle to simulate higher resolution clock
+  var nsecs = options.nsecs !== undefined ? options.nsecs : _lastNSecs + 1;
+
+  // Time since last uuid creation (in msecs)
+  var dt = msecs - _lastMSecs + (nsecs - _lastNSecs) / 10000;
+
+  // Per 4.2.1.2, Bump clockseq on clock regression
+  if (dt < 0 && options.clockseq === undefined) {
+    clockseq = clockseq + 1 & 0x3fff;
+  }
+
+  // Reset nsecs if clock regresses (new clockseq) or we've moved onto a new
+  // time interval
+  if ((dt < 0 || msecs > _lastMSecs) && options.nsecs === undefined) {
+    nsecs = 0;
+  }
+
+  // Per 4.2.1.2 Throw error if too many uuids are requested
+  if (nsecs >= 10000) {
+    throw new Error('uuid.v1(): Can\'t create more than 10M uuids/sec');
+  }
+  _lastMSecs = msecs;
+  _lastNSecs = nsecs;
+  _clockseq = clockseq;
+
+  // Per 4.1.4 - Convert from unix epoch to Gregorian epoch
+  msecs += 12219292800000;
+
+  // `time_low`
+  var tl = ((msecs & 0xfffffff) * 10000 + nsecs) % 0x100000000;
+  b[i++] = tl >>> 24 & 0xff;
+  b[i++] = tl >>> 16 & 0xff;
+  b[i++] = tl >>> 8 & 0xff;
+  b[i++] = tl & 0xff;
+
+  // `time_mid`
+  var tmh = msecs / 0x100000000 * 10000 & 0xfffffff;
+  b[i++] = tmh >>> 8 & 0xff;
+  b[i++] = tmh & 0xff;
+
+  // `time_high_and_version`
+  b[i++] = tmh >>> 24 & 0xf | 0x10; // include version
+  b[i++] = tmh >>> 16 & 0xff;
+
+  // `clock_seq_hi_and_reserved` (Per 4.2.2 - include variant)
+  b[i++] = clockseq >>> 8 | 0x80;
+
+  // `clock_seq_low`
+  b[i++] = clockseq & 0xff;
+
+  // `node`
+  for (var n = 0; n < 6; ++n) {
+    b[i + n] = node[n];
+  }
+  return buf ? buf : bytesToUuid$1(b);
+}
+var v1_1 = v1$1;
+
+var rng = rng$2;
+var bytesToUuid = bytesToUuid_1;
+function v4$1(options, buf, offset) {
+  var i = buf && offset || 0;
+  if (typeof options == 'string') {
+    buf = options === 'binary' ? new Array(16) : null;
+    options = null;
+  }
+  options = options || {};
+  var rnds = options.random || (options.rng || rng)();
+
+  // Per 4.4, set bits for version and `clock_seq_hi_and_reserved`
+  rnds[6] = rnds[6] & 0x0f | 0x40;
+  rnds[8] = rnds[8] & 0x3f | 0x80;
+
+  // Copy bytes to buffer, if provided
+  if (buf) {
+    for (var ii = 0; ii < 16; ++ii) {
+      buf[i + ii] = rnds[ii];
+    }
+  }
+  return buf || bytesToUuid(rnds);
+}
+var v4_1 = v4$1;
+
+var v1 = v1_1;
+var v4 = v4_1;
+var uuid$1 = v4;
+uuid$1.v1 = v1;
+uuid$1.v4 = v4;
+var uuid_1 = uuid$1;
+
+var peerSsdp$1 = {};
+
+/*******************************************************************************
+ * 
+ * Copyright (c) 2013 Louay Bassbouss, Fraunhofer FOKUS, All rights reserved.
+ * 
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 3.0 of the License, or (at your option) any later version.
+ * 
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ * 
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library. If not, see <http://www.gnu.org/licenses/>. 
+ * 
+ * AUTHORS: Louay Bassbouss (louay.bassbouss@fokus.fraunhofer.de)
+ *     Martin Lasak (martin.lasak@fokus.fraunhofer.de)
+ *     Alexander Futasz (alexander.futasz@fokus.fraunhofer.de)
+ *
+ ******************************************************************************/
+var dgram = require$$0$5;
+var events$1 = require$$1$1;
+var os$1 = require$$2$2;
+var util$4 = require$$0$4;
+var SSDP_ADDRESS = "239.255.255.250";
+var SSDP_PORT = 1900;
+var SSDP_HOST = SSDP_ADDRESS + ":" + SSDP_PORT;
+var MAX_AGE = "max-age=1800";
+var TTL = 128;
+var MX = 2;
+var ALIVE = "ssdp:alive";
+var BYEBYE = "ssdp:byebye";
+var UPDATE = "ssdp:update";
+var TYPE_M_SEARCH = "M-SEARCH";
+var TYPE_NOTIFY = "NOTIFY";
+var TYPE_200_OK = "200 OK";
+var Peer = function Peer() {
+  var options = arguments.length > 0 && arguments[0] !== undefined ? arguments[0] : {};
+  this.mcSocket = null;
+  this.ucSocket = null;
+  this.bindToInterfaces = options.bindToInterfaces || null;
+  this.bindToAddresses = options.bindToAddresses || null;
+};
+util$4.inherits(Peer, events$1.EventEmitter);
+
+/**
+ * start the SSDP listening
+ */
+Peer.prototype.start = function () {
+  var socketMap = {};
+  var self = this;
+  var ready = 0;
+  var onMessage = function onMessage(msg, address) {
+    var req = deserialize(msg);
+    self.emit(req.type, req.headers, address);
+  };
+  var onListening = function onListening() {
+    self.emit("listening");
+  };
+  var onClose = function onClose(err) {
+    if (--ready <= 0) {
+      self.emit("close", err);
+      ready = 0;
+    }
+  };
+  var onError = function onError(err) {
+    self.emit("error", err);
+  };
+  var onReady = function onReady() {
+    if (++ready == 1) {
+      self.emit("ready");
+    }
+  };
+
+  //bind handler: socket, this-object, [interface address], isMulticast
+  var onBind = function onBind(s, t, a, isMc) {
+    return function () {
+      s.setMulticastTTL(TTL);
+      if (isMc) {
+        s.setBroadcast(true);
+        a ? s.addMembership(SSDP_ADDRESS, a) : s.addMembership(SSDP_ADDRESS);
+        s.setMulticastLoopback(true);
+      }
+      onReady.call(t);
+    };
+  };
+
+  // Multicast Socket(s) Handling
+  var socketHandling = function socketHandling(adr) {
+    socketMap[adr] = {
+      unicast: null,
+      multicast: null
+    };
+    // unicast socket
+    var uc = null;
+    try {
+      // this is for version >= 0.12.x
+      uc = dgram.createSocket({
+        type: "udp4",
+        reuseAddr: true
+      });
+    } catch (e) {
+      // error is throws if version < 0.12.x. 
+      uc = dgram.createSocket("udp4");
+    }
+    uc.on("message", onMessage);
+    uc.on("listening", onListening);
+    uc.on('error', onError);
+    uc.on('close', onClose);
+    uc.bind(50000 + Math.floor(Math.random() * 1000), adr, onBind(uc, this, adr, false));
+    socketMap[adr].unicast = uc;
+    // multicast socket
+    var mc = null;
+    try {
+      // this is for version >= 0.12.x
+      mc = dgram.createSocket({
+        type: "udp4",
+        reuseAddr: true
+      });
+    } catch (e) {
+      // error is throws if version < 0.12.x. 
+      mc = dgram.createSocket("udp4");
+    }
+    mc.on("message", onMessage);
+    mc.on("listening", onListening);
+    mc.on('error', onError);
+    mc.on('close', onClose);
+    mc.bind(SSDP_PORT, onBind(mc, this, adr, true));
+    socketMap[adr].multicast = mc;
+  };
+  var filterInterfaces = function filterInterfaces(interfaces) {
+    if (Array.isArray(self.bindToInterfaces) && self.bindToInterfaces.length > 0) {
+      var filtered = {};
+      for (var i in interfaces) {
+        if (self.bindToInterfaces.indexOf(i) >= 0) {
+          filtered[i] = interfaces[i];
+        }
+      }
+      return filtered;
+    } else {
+      return interfaces;
+    }
+  };
+  var isBindToAddress = function isBindToAddress(address) {
+    if (Array.isArray(self.bindToAddresses) && self.bindToAddresses.length > 0) {
+      return self.bindToAddresses.indexOf(address) >= 0;
+    } else {
+      return true;
+    }
+  };
+  var interfaces = filterInterfaces(os$1.networkInterfaces());
+  for (var i in interfaces) {
+    for (var j = 0; j < interfaces[i].length; j++) {
+      var intr = interfaces[i][j];
+      if (intr.family == 'IPv4' && !intr.internal && isBindToAddress(intr.address)) {
+        socketHandling(intr.address);
+      }
+    }
+  }
+  var interfaceDiscoHandle = setInterval(function () {
+    var currentInterfaces = {};
+    var interfaces = filterInterfaces(os$1.networkInterfaces());
+    for (var i in interfaces) {
+      for (var j = 0; j < interfaces[i].length; j++) {
+        var intr = interfaces[i][j];
+        if (intr.family == 'IPv4' && !intr.internal && isBindToAddress(intr.address)) {
+          currentInterfaces[intr.address] = true;
+        }
+      }
+    }
+    for (var i in currentInterfaces) {
+      if (socketMap[i] && socketMap[i].multicast && socketMap[i].unicast) ; else {
+        //console.log("new address, so create socket for it: ",i);
+        socketHandling(i);
+      }
+    }
+    for (var i in socketMap) {
+      if (socketMap[i] && socketMap[i].multicast && socketMap[i].unicast && !currentInterfaces[i]) {
+        //console.log("known old address, so remove this socket: ",i);
+        socketMap[i].multicast.close();
+        delete socketMap[i].multicast;
+        socketMap[i].unicast.close();
+        delete socketMap[i].unicast;
+      }
+    }
+  }, 15000);
+  this.stopInterfaceDisco = function () {
+    interfaceDiscoHandle ? clearInterval(interfaceDiscoHandle) : 0;
+  };
+  this.mcSocket = {
+    close: function close() {
+      for (var i in socketMap) {
+        if (socketMap[i].multicast) {
+          socketMap[i].multicast.close();
+          delete socketMap[i].multicast;
+        }
+      }
+    },
+    send: function send(processMessageCallback) {
+      var processMessage = typeof processMessageCallback == "function";
+      for (var i in socketMap) {
+        if (socketMap[i].multicast) {
+          var args = processMessage ? processMessageCallback(i) : arguments;
+          socketMap[i].multicast.send.apply(socketMap[i].multicast, args);
+        }
+      }
+    }
+  };
+  this.ucSocket = {
+    close: function close() {
+      for (var i in socketMap) {
+        if (socketMap[i].unicast) {
+          socketMap[i].unicast.close();
+          delete socketMap[i].unicast;
+        }
+      }
+    },
+    send: function send(processMessageCallback) {
+      var processMessage = typeof processMessageCallback == "function";
+      for (var i in socketMap) {
+        if (socketMap[i].unicast) {
+          var args = processMessage ? processMessageCallback(i) : arguments;
+          socketMap[i].unicast.send.apply(socketMap[i].unicast, args);
+        }
+      }
+    }
+  };
+  return this;
+};
+/**
+ * close the SSDP listening.
+ */
+Peer.prototype.close = function () {
+  this.stopInterfaceDisco();
+  this.mcSocket && this.mcSocket.close();
+  this.ucSocket && this.ucSocket.close();
+};
+
+/**
+ * notify a SSDP message
+ * @param headers
+ * @param  callback
+ */
+Peer.prototype.notify = function (headers, callback) {
+  headers['HOST'] = headers['HOST'] || SSDP_HOST;
+  headers['CACHE-CONTROL'] = headers['CACHE-CONTROL'] || MAX_AGE;
+  headers['EXT'] = headers['EXT'] || "";
+  headers['DATE'] = headers['DATE'] || new Date().toUTCString();
+  var processMessageCallback = function processMessageCallback(networkInterfaceAddress) {
+    var msg = new Buffer(serialize$1(TYPE_NOTIFY + " * HTTP/1.1", headers, networkInterfaceAddress));
+    return [msg, 0, msg.length, SSDP_PORT, SSDP_ADDRESS, function (err, bytes) {
+      typeof callback == "function" && callback.call(null, err, bytes);
+    }];
+  };
+  new Buffer(serialize$1(TYPE_NOTIFY + " * HTTP/1.1", headers));
+  this.mcSocket.send(processMessageCallback);
+};
+
+/**
+ * notify an SSDP alive message
+ */
+Peer.prototype.alive = function (headers, callback) {
+  headers['NTS'] = ALIVE;
+  this.notify(headers, callback);
+};
+
+/**
+ * notify an SSDP byebye message
+ */
+Peer.prototype.byebye = function (headers, callback) {
+  headers['NTS'] = BYEBYE;
+  this.notify(headers, callback);
+};
+
+/**
+ * notify an SSDP update message
+ */
+Peer.prototype.update = function (headers, callback) {
+  headers['NTS'] = UPDATE;
+  this.notify(headers, callback);
+};
+
+/**
+ * 
+ */
+Peer.prototype.search = function (headers, callback) {
+  headers['HOST'] = headers['HOST'] || SSDP_HOST;
+  headers['MAN'] = '"ssdp:discover"';
+  headers['MX'] = headers['MX'] || MX;
+  var processMessageCallback = function processMessageCallback(networkInterfaceAddress) {
+    var msg = new Buffer(serialize$1(TYPE_M_SEARCH + " * HTTP/1.1", headers, networkInterfaceAddress));
+    return [msg, 0, msg.length, SSDP_PORT, SSDP_ADDRESS, function (err, bytes) {
+      typeof callback == "function" && callback.call(null, err, bytes);
+    }];
+  };
+  this.ucSocket.send(processMessageCallback);
+};
+
+/**
+ * 
+ */
+Peer.prototype.reply = function (headers, address, callback) {
+  headers['HOST'] = headers['HOST'] || SSDP_HOST;
+  headers['CACHE-CONTROL'] = headers['CACHE-CONTROL'] || MAX_AGE;
+  headers['EXT'] = headers['EXT'] || "";
+  headers['DATE'] = headers['DATE'] || new Date().toUTCString();
+  var processMessageCallback = function processMessageCallback(networkInterfaceAddress) {
+    var msg = new Buffer(serialize$1("HTTP/1.1 " + TYPE_200_OK, headers, networkInterfaceAddress));
+    return [msg, 0, msg.length, address.port, address.address, function (err, bytes) {
+      typeof callback == "function" && callback.call(null, err, bytes);
+    }];
+  };
+  this.ucSocket.send(processMessageCallback);
+};
+var serialize$1 = function serialize(head, headers, networkInterfaceAddress) {
+  var result = head + "\r\n";
+  Object.keys(headers).forEach(function (n) {
+    result += n + ": " + headers[n] + "\r\n";
+  });
+  result += "\r\n";
+  if (networkInterfaceAddress) {
+    result = result.replace(/{{networkInterfaceAddress}}/g, networkInterfaceAddress);
+  }
+  return result;
+};
+var deserialize = function deserialize(msg) {
+  var lines = msg.toString().split('\r\n');
+  var line = lines.shift();
+  var headers = {};
+  var type = null;
+  if (line.match(/HTTP\/(\d{1})\.(\d{1}) (\d+) (.*)/)) {
+    type = "found";
+  } else {
+    var t = line.split(' ')[0];
+    type = t == TYPE_M_SEARCH ? "search" : t == TYPE_NOTIFY ? "notify" : null;
+  }
+  lines.forEach(function (line) {
+    if (line.length) {
+      var vv = line.match(/^([^:]+):\s*(.*)$/);
+      if (vv && vv.length === 3) {
+        headers[vv[1].toUpperCase()] = vv[2];
+      }
+    }
+  });
+  return {
+    type: type,
+    headers: headers
+  };
+};
+
+/**
+ * create an new SSDP Peer
+ */
+peerSsdp$1.createPeer = function (options) {
+  var peer = new Peer(options);
+  return peer;
+};
+peerSsdp$1.ALIVE = ALIVE;
+peerSsdp$1.BYEBYE = BYEBYE;
+peerSsdp$1.UPDATE = UPDATE;
+
+/*******************************************************************************
+ * 
+ * Copyright (c) 2013 Louay Bassbouss, Fraunhofer FOKUS, All rights reserved.
+ * 
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 3.0 of the License, or (at your option) any later version.
+ * 
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ * 
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library. If not, see <http://www.gnu.org/licenses/>. 
+ * 
+ * AUTHORS: Louay Bassbouss (louay.bassbouss@fokus.fraunhofer.de)
+ *     Martin Lasak (martin.lasak@fokus.fraunhofer.de)
+ *     Alexander Futasz (alexander.futasz@fokus.fraunhofer.de)
+ *
+ ******************************************************************************/
+var peerSsdp = peerSsdp$1;
+
+var ejs$1 = {};
+
+var utils$2 = {};
+
+/*
+ * EJS Embedded JavaScript templates
+ * Copyright 2112 Matthew Eernisse (mde@fleegix.org)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *         http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+*/
+(function (exports) {
+
+  var regExpChars = /[|\\{}()[\]^$+*?.]/g;
+  var hasOwnProperty = Object.prototype.hasOwnProperty;
+  var hasOwn = function hasOwn(obj, key) {
+    return hasOwnProperty.apply(obj, [key]);
+  };
+
+  /**
+   * Escape characters reserved in regular expressions.
+   *
+   * If `string` is `undefined` or `null`, the empty string is returned.
+   *
+   * @param {String} string Input string
+   * @return {String} Escaped string
+   * @static
+   * @private
+   */
+  exports.escapeRegExpChars = function (string) {
+    // istanbul ignore if
+    if (!string) {
+      return '';
+    }
+    return String(string).replace(regExpChars, '\\$&');
+  };
+  var _ENCODE_HTML_RULES = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&#34;',
+    "'": '&#39;'
+  };
+  var _MATCH_HTML = /[&<>'"]/g;
+  function encode_char(c) {
+    return _ENCODE_HTML_RULES[c] || c;
+  }
+
+  /**
+   * Stringified version of constants used by {@link module:utils.escapeXML}.
+   *
+   * It is used in the process of generating {@link ClientFunction}s.
+   *
+   * @readonly
+   * @type {String}
+   */
+
+  var escapeFuncStr = 'var _ENCODE_HTML_RULES = {\n' + '      "&": "&amp;"\n' + '    , "<": "&lt;"\n' + '    , ">": "&gt;"\n' + '    , \'"\': "&#34;"\n' + '    , "\'": "&#39;"\n' + '    }\n' + '  , _MATCH_HTML = /[&<>\'"]/g;\n' + 'function encode_char(c) {\n' + '  return _ENCODE_HTML_RULES[c] || c;\n' + '};\n';
+
+  /**
+   * Escape characters reserved in XML.
+   *
+   * If `markup` is `undefined` or `null`, the empty string is returned.
+   *
+   * @implements {EscapeCallback}
+   * @param {String} markup Input string
+   * @return {String} Escaped string
+   * @static
+   * @private
+   */
+
+  exports.escapeXML = function (markup) {
+    return markup == undefined ? '' : String(markup).replace(_MATCH_HTML, encode_char);
+  };
+  function escapeXMLToString() {
+    return Function.prototype.toString.call(this) + ';\n' + escapeFuncStr;
+  }
+  try {
+    if (typeof Object.defineProperty === 'function') {
+      // If the Function prototype is frozen, the "toString" property is non-writable. This means that any objects which inherit this property
+      // cannot have the property changed using an assignment. If using strict mode, attempting that will cause an error. If not using strict
+      // mode, attempting that will be silently ignored.
+      // However, we can still explicitly shadow the prototype's "toString" property by defining a new "toString" property on this object.
+      Object.defineProperty(exports.escapeXML, 'toString', {
+        value: escapeXMLToString
+      });
+    } else {
+      // If Object.defineProperty() doesn't exist, attempt to shadow this property using the assignment operator.
+      exports.escapeXML.toString = escapeXMLToString;
+    }
+  } catch (err) {
+    console.warn('Unable to set escapeXML.toString (is the Function prototype frozen?)');
+  }
+
+  /**
+   * Naive copy of properties from one object to another.
+   * Does not recurse into non-scalar properties
+   * Does not check to see if the property has a value before copying
+   *
+   * @param  {Object} to   Destination object
+   * @param  {Object} from Source object
+   * @return {Object}      Destination object
+   * @static
+   * @private
+   */
+  exports.shallowCopy = function (to, from) {
+    from = from || {};
+    if (to !== null && to !== undefined) {
+      for (var p in from) {
+        if (!hasOwn(from, p)) {
+          continue;
+        }
+        if (p === '__proto__' || p === 'constructor') {
+          continue;
+        }
+        to[p] = from[p];
+      }
+    }
+    return to;
+  };
+
+  /**
+   * Naive copy of a list of key names, from one object to another.
+   * Only copies property if it is actually defined
+   * Does not recurse into non-scalar properties
+   *
+   * @param  {Object} to   Destination object
+   * @param  {Object} from Source object
+   * @param  {Array} list List of properties to copy
+   * @return {Object}      Destination object
+   * @static
+   * @private
+   */
+  exports.shallowCopyFromList = function (to, from, list) {
+    list = list || [];
+    from = from || {};
+    if (to !== null && to !== undefined) {
+      for (var i = 0; i < list.length; i++) {
+        var p = list[i];
+        if (typeof from[p] != 'undefined') {
+          if (!hasOwn(from, p)) {
+            continue;
+          }
+          if (p === '__proto__' || p === 'constructor') {
+            continue;
+          }
+          to[p] = from[p];
+        }
+      }
+    }
+    return to;
+  };
+
+  /**
+   * Simple in-process cache implementation. Does not implement limits of any
+   * sort.
+   *
+   * @implements {Cache}
+   * @static
+   * @private
+   */
+  exports.cache = {
+    _data: {},
+    set: function set(key, val) {
+      this._data[key] = val;
+    },
+    get: function get(key) {
+      return this._data[key];
+    },
+    remove: function remove(key) {
+      delete this._data[key];
+    },
+    reset: function reset() {
+      this._data = {};
+    }
+  };
+
+  /**
+   * Transforms hyphen case variable into camel case.
+   *
+   * @param {String} string Hyphen case string
+   * @return {String} Camel case string
+   * @static
+   * @private
+   */
+  exports.hyphenToCamel = function (str) {
+    return str.replace(/-[a-z]/g, function (match) {
+      return match[1].toUpperCase();
+    });
+  };
+
+  /**
+   * Returns a null-prototype object in runtimes that support it
+   *
+   * @return {Object} Object, prototype will be set to null where possible
+   * @static
+   * @private
+   */
+  exports.createNullProtoObjWherePossible = function () {
+    if (typeof Object.create == 'function') {
+      return function () {
+        return Object.create(null);
+      };
+    }
+    if (!({
+      __proto__: null
+    } instanceof Object)) {
+      return function () {
+        return {
+          __proto__: null
+        };
+      };
+    }
+    // Not possible, just pass through
+    return function () {
+      return {};
+    };
+  }();
+  exports.hasOwnOnlyObject = function (obj) {
+    var o = exports.createNullProtoObjWherePossible();
+    for (var p in obj) {
+      if (hasOwn(obj, p)) {
+        o[p] = obj[p];
+      }
+    }
+    return o;
+  };
+})(utils$2);
+
+var version = "3.1.10";
+var require$$3$1 = {
+	version: version};
+
+/*
+ * EJS Embedded JavaScript templates
+ * Copyright 2112 Matthew Eernisse (mde@fleegix.org)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *         http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+*/
+(function (exports) {
+
+  /**
+   * @file Embedded JavaScript templating engine. {@link http://ejs.co}
+   * @author Matthew Eernisse <mde@fleegix.org>
+   * @author Tiancheng "Timothy" Gu <timothygu99@gmail.com>
+   * @project EJS
+   * @license {@link http://www.apache.org/licenses/LICENSE-2.0 Apache License, Version 2.0}
+   */
+
+  /**
+   * EJS internal functions.
+   *
+   * Technically this "module" lies in the same file as {@link module:ejs}, for
+   * the sake of organization all the private functions re grouped into this
+   * module.
+   *
+   * @module ejs-internal
+   * @private
+   */
+
+  /**
+   * Embedded JavaScript templating engine.
+   *
+   * @module ejs
+   * @public
+   */
+  var fs = require$$1$2;
+  var path = require$$1$3;
+  var utils = utils$2;
+  var scopeOptionWarned = false;
+  /** @type {string} */
+  var _VERSION_STRING = require$$3$1.version;
+  var _DEFAULT_OPEN_DELIMITER = '<';
+  var _DEFAULT_CLOSE_DELIMITER = '>';
+  var _DEFAULT_DELIMITER = '%';
+  var _DEFAULT_LOCALS_NAME = 'locals';
+  var _NAME = 'ejs';
+  var _REGEX_STRING = '(<%%|%%>|<%=|<%-|<%_|<%#|<%|%>|-%>|_%>)';
+  var _OPTS_PASSABLE_WITH_DATA = ['delimiter', 'scope', 'context', 'debug', 'compileDebug', 'client', '_with', 'rmWhitespace', 'strict', 'filename', 'async'];
+  // We don't allow 'cache' option to be passed in the data obj for
+  // the normal `render` call, but this is where Express 2 & 3 put it
+  // so we make an exception for `renderFile`
+  var _OPTS_PASSABLE_WITH_DATA_EXPRESS = _OPTS_PASSABLE_WITH_DATA.concat('cache');
+  var _BOM = /^\uFEFF/;
+  var _JS_IDENTIFIER = /^[a-zA-Z_$][0-9a-zA-Z_$]*$/;
+
+  /**
+   * EJS template function cache. This can be a LRU object from lru-cache NPM
+   * module. By default, it is {@link module:utils.cache}, a simple in-process
+   * cache that grows continuously.
+   *
+   * @type {Cache}
+   */
+
+  exports.cache = utils.cache;
+
+  /**
+   * Custom file loader. Useful for template preprocessing or restricting access
+   * to a certain part of the filesystem.
+   *
+   * @type {fileLoader}
+   */
+
+  exports.fileLoader = fs.readFileSync;
+
+  /**
+   * Name of the object containing the locals.
+   *
+   * This variable is overridden by {@link Options}`.localsName` if it is not
+   * `undefined`.
+   *
+   * @type {String}
+   * @public
+   */
+
+  exports.localsName = _DEFAULT_LOCALS_NAME;
+
+  /**
+   * Promise implementation -- defaults to the native implementation if available
+   * This is mostly just for testability
+   *
+   * @type {PromiseConstructorLike}
+   * @public
+   */
+
+  exports.promiseImpl = new Function('return this;')().Promise;
+
+  /**
+   * Get the path to the included file from the parent file path and the
+   * specified path.
+   *
+   * @param {String}  name     specified path
+   * @param {String}  filename parent file path
+   * @param {Boolean} [isDir=false] whether the parent file path is a directory
+   * @return {String}
+   */
+  exports.resolveInclude = function (name, filename, isDir) {
+    var dirname = path.dirname;
+    var extname = path.extname;
+    var resolve = path.resolve;
+    var includePath = resolve(isDir ? filename : dirname(filename), name);
+    var ext = extname(name);
+    if (!ext) {
+      includePath += '.ejs';
+    }
+    return includePath;
+  };
+
+  /**
+   * Try to resolve file path on multiple directories
+   *
+   * @param  {String}        name  specified path
+   * @param  {Array<String>} paths list of possible parent directory paths
+   * @return {String}
+   */
+  function resolvePaths(name, paths) {
+    var filePath;
+    if (paths.some(function (v) {
+      filePath = exports.resolveInclude(name, v, true);
+      return fs.existsSync(filePath);
+    })) {
+      return filePath;
+    }
+  }
+
+  /**
+   * Get the path to the included file by Options
+   *
+   * @param  {String}  path    specified path
+   * @param  {Options} options compilation options
+   * @return {String}
+   */
+  function getIncludePath(path, options) {
+    var includePath;
+    var filePath;
+    var views = options.views;
+    var match = /^[A-Za-z]+:\\|^\//.exec(path);
+
+    // Abs path
+    if (match && match.length) {
+      path = path.replace(/^\/*/, '');
+      if (Array.isArray(options.root)) {
+        includePath = resolvePaths(path, options.root);
+      } else {
+        includePath = exports.resolveInclude(path, options.root || '/', true);
+      }
+    }
+    // Relative paths
+    else {
+      // Look relative to a passed filename first
+      if (options.filename) {
+        filePath = exports.resolveInclude(path, options.filename);
+        if (fs.existsSync(filePath)) {
+          includePath = filePath;
+        }
+      }
+      // Then look in any views directories
+      if (!includePath && Array.isArray(views)) {
+        includePath = resolvePaths(path, views);
+      }
+      if (!includePath && typeof options.includer !== 'function') {
+        throw new Error('Could not find the include file "' + options.escapeFunction(path) + '"');
+      }
+    }
+    return includePath;
+  }
+
+  /**
+   * Get the template from a string or a file, either compiled on-the-fly or
+   * read from cache (if enabled), and cache the template if needed.
+   *
+   * If `template` is not set, the file specified in `options.filename` will be
+   * read.
+   *
+   * If `options.cache` is true, this function reads the file from
+   * `options.filename` so it must be set prior to calling this function.
+   *
+   * @memberof module:ejs-internal
+   * @param {Options} options   compilation options
+   * @param {String} [template] template source
+   * @return {(TemplateFunction|ClientFunction)}
+   * Depending on the value of `options.client`, either type might be returned.
+   * @static
+   */
+
+  function handleCache(options, template) {
+    var func;
+    var filename = options.filename;
+    var hasTemplate = arguments.length > 1;
+    if (options.cache) {
+      if (!filename) {
+        throw new Error('cache option requires a filename');
+      }
+      func = exports.cache.get(filename);
+      if (func) {
+        return func;
+      }
+      if (!hasTemplate) {
+        template = fileLoader(filename).toString().replace(_BOM, '');
+      }
+    } else if (!hasTemplate) {
+      // istanbul ignore if: should not happen at all
+      if (!filename) {
+        throw new Error('Internal EJS error: no file name or template ' + 'provided');
+      }
+      template = fileLoader(filename).toString().replace(_BOM, '');
+    }
+    func = exports.compile(template, options);
+    if (options.cache) {
+      exports.cache.set(filename, func);
+    }
+    return func;
+  }
+
+  /**
+   * Try calling handleCache with the given options and data and call the
+   * callback with the result. If an error occurs, call the callback with
+   * the error. Used by renderFile().
+   *
+   * @memberof module:ejs-internal
+   * @param {Options} options    compilation options
+   * @param {Object} data        template data
+   * @param {RenderFileCallback} cb callback
+   * @static
+   */
+
+  function tryHandleCache(options, data, cb) {
+    var result;
+    if (!cb) {
+      if (typeof exports.promiseImpl == 'function') {
+        return new exports.promiseImpl(function (resolve, reject) {
+          try {
+            result = handleCache(options)(data);
+            resolve(result);
+          } catch (err) {
+            reject(err);
+          }
+        });
+      } else {
+        throw new Error('Please provide a callback function');
+      }
+    } else {
+      try {
+        result = handleCache(options)(data);
+      } catch (err) {
+        return cb(err);
+      }
+      cb(null, result);
+    }
+  }
+
+  /**
+   * fileLoader is independent
+   *
+   * @param {String} filePath ejs file path.
+   * @return {String} The contents of the specified file.
+   * @static
+   */
+
+  function fileLoader(filePath) {
+    return exports.fileLoader(filePath);
+  }
+
+  /**
+   * Get the template function.
+   *
+   * If `options.cache` is `true`, then the template is cached.
+   *
+   * @memberof module:ejs-internal
+   * @param {String}  path    path for the specified file
+   * @param {Options} options compilation options
+   * @return {(TemplateFunction|ClientFunction)}
+   * Depending on the value of `options.client`, either type might be returned
+   * @static
+   */
+
+  function includeFile(path, options) {
+    var opts = utils.shallowCopy(utils.createNullProtoObjWherePossible(), options);
+    opts.filename = getIncludePath(path, opts);
+    if (typeof options.includer === 'function') {
+      var includerResult = options.includer(path, opts.filename);
+      if (includerResult) {
+        if (includerResult.filename) {
+          opts.filename = includerResult.filename;
+        }
+        if (includerResult.template) {
+          return handleCache(opts, includerResult.template);
+        }
+      }
+    }
+    return handleCache(opts);
+  }
+
+  /**
+   * Re-throw the given `err` in context to the `str` of ejs, `filename`, and
+   * `lineno`.
+   *
+   * @implements {RethrowCallback}
+   * @memberof module:ejs-internal
+   * @param {Error}  err      Error object
+   * @param {String} str      EJS source
+   * @param {String} flnm     file name of the EJS file
+   * @param {Number} lineno   line number of the error
+   * @param {EscapeCallback} esc
+   * @static
+   */
+
+  function rethrow(err, str, flnm, lineno, esc) {
+    var lines = str.split('\n');
+    var start = Math.max(lineno - 3, 0);
+    var end = Math.min(lines.length, lineno + 3);
+    var filename = esc(flnm);
+    // Error context
+    var context = lines.slice(start, end).map(function (line, i) {
+      var curr = i + start + 1;
+      return (curr == lineno ? ' >> ' : '    ') + curr + '| ' + line;
+    }).join('\n');
+
+    // Alter exception message
+    err.path = filename;
+    err.message = (filename || 'ejs') + ':' + lineno + '\n' + context + '\n\n' + err.message;
+    throw err;
+  }
+  function stripSemi(str) {
+    return str.replace(/;(\s*$)/, '$1');
+  }
+
+  /**
+   * Compile the given `str` of ejs into a template function.
+   *
+   * @param {String}  template EJS template
+   *
+   * @param {Options} [opts] compilation options
+   *
+   * @return {(TemplateFunction|ClientFunction)}
+   * Depending on the value of `opts.client`, either type might be returned.
+   * Note that the return type of the function also depends on the value of `opts.async`.
+   * @public
+   */
+
+  exports.compile = function compile(template, opts) {
+    var templ;
+
+    // v1 compat
+    // 'scope' is 'context'
+    // FIXME: Remove this in a future version
+    if (opts && opts.scope) {
+      if (!scopeOptionWarned) {
+        console.warn('`scope` option is deprecated and will be removed in EJS 3');
+        scopeOptionWarned = true;
+      }
+      if (!opts.context) {
+        opts.context = opts.scope;
+      }
+      delete opts.scope;
+    }
+    templ = new Template(template, opts);
+    return templ.compile();
+  };
+
+  /**
+   * Render the given `template` of ejs.
+   *
+   * If you would like to include options but not data, you need to explicitly
+   * call this function with `data` being an empty object or `null`.
+   *
+   * @param {String}   template EJS template
+   * @param {Object}  [data={}] template data
+   * @param {Options} [opts={}] compilation and rendering options
+   * @return {(String|Promise<String>)}
+   * Return value type depends on `opts.async`.
+   * @public
+   */
+
+  exports.render = function (template, d, o) {
+    var data = d || utils.createNullProtoObjWherePossible();
+    var opts = o || utils.createNullProtoObjWherePossible();
+
+    // No options object -- if there are optiony names
+    // in the data, copy them to options
+    if (arguments.length == 2) {
+      utils.shallowCopyFromList(opts, data, _OPTS_PASSABLE_WITH_DATA);
+    }
+    return handleCache(opts, template)(data);
+  };
+
+  /**
+   * Render an EJS file at the given `path` and callback `cb(err, str)`.
+   *
+   * If you would like to include options but not data, you need to explicitly
+   * call this function with `data` being an empty object or `null`.
+   *
+   * @param {String}             path     path to the EJS file
+   * @param {Object}            [data={}] template data
+   * @param {Options}           [opts={}] compilation and rendering options
+   * @param {RenderFileCallback} cb callback
+   * @public
+   */
+
+  exports.renderFile = function () {
+    var args = Array.prototype.slice.call(arguments);
+    var filename = args.shift();
+    var cb;
+    var opts = {
+      filename: filename
+    };
+    var data;
+    var viewOpts;
+
+    // Do we have a callback?
+    if (typeof arguments[arguments.length - 1] == 'function') {
+      cb = args.pop();
+    }
+    // Do we have data/opts?
+    if (args.length) {
+      // Should always have data obj
+      data = args.shift();
+      // Normal passed opts (data obj + opts obj)
+      if (args.length) {
+        // Use shallowCopy so we don't pollute passed in opts obj with new vals
+        utils.shallowCopy(opts, args.pop());
+      }
+      // Special casing for Express (settings + opts-in-data)
+      else {
+        // Express 3 and 4
+        if (data.settings) {
+          // Pull a few things from known locations
+          if (data.settings.views) {
+            opts.views = data.settings.views;
+          }
+          if (data.settings['view cache']) {
+            opts.cache = true;
+          }
+          // Undocumented after Express 2, but still usable, esp. for
+          // items that are unsafe to be passed along with data, like `root`
+          viewOpts = data.settings['view options'];
+          if (viewOpts) {
+            utils.shallowCopy(opts, viewOpts);
+          }
+        }
+        // Express 2 and lower, values set in app.locals, or people who just
+        // want to pass options in their data. NOTE: These values will override
+        // anything previously set in settings  or settings['view options']
+        utils.shallowCopyFromList(opts, data, _OPTS_PASSABLE_WITH_DATA_EXPRESS);
+      }
+      opts.filename = filename;
+    } else {
+      data = utils.createNullProtoObjWherePossible();
+    }
+    return tryHandleCache(opts, data, cb);
+  };
+
+  /**
+   * Clear intermediate JavaScript cache. Calls {@link Cache#reset}.
+   * @public
+   */
+
+  /**
+   * EJS template class
+   * @public
+   */
+  exports.Template = Template;
+  exports.clearCache = function () {
+    exports.cache.reset();
+  };
+  function Template(text, optsParam) {
+    var opts = utils.hasOwnOnlyObject(optsParam);
+    var options = utils.createNullProtoObjWherePossible();
+    this.templateText = text;
+    /** @type {string | null} */
+    this.mode = null;
+    this.truncate = false;
+    this.currentLine = 1;
+    this.source = '';
+    options.client = opts.client || false;
+    options.escapeFunction = opts.escape || opts.escapeFunction || utils.escapeXML;
+    options.compileDebug = opts.compileDebug !== false;
+    options.debug = !!opts.debug;
+    options.filename = opts.filename;
+    options.openDelimiter = opts.openDelimiter || exports.openDelimiter || _DEFAULT_OPEN_DELIMITER;
+    options.closeDelimiter = opts.closeDelimiter || exports.closeDelimiter || _DEFAULT_CLOSE_DELIMITER;
+    options.delimiter = opts.delimiter || exports.delimiter || _DEFAULT_DELIMITER;
+    options.strict = opts.strict || false;
+    options.context = opts.context;
+    options.cache = opts.cache || false;
+    options.rmWhitespace = opts.rmWhitespace;
+    options.root = opts.root;
+    options.includer = opts.includer;
+    options.outputFunctionName = opts.outputFunctionName;
+    options.localsName = opts.localsName || exports.localsName || _DEFAULT_LOCALS_NAME;
+    options.views = opts.views;
+    options.async = opts.async;
+    options.destructuredLocals = opts.destructuredLocals;
+    options.legacyInclude = typeof opts.legacyInclude != 'undefined' ? !!opts.legacyInclude : true;
+    if (options.strict) {
+      options._with = false;
+    } else {
+      options._with = typeof opts._with != 'undefined' ? opts._with : true;
+    }
+    this.opts = options;
+    this.regex = this.createRegex();
+  }
+  Template.modes = {
+    EVAL: 'eval',
+    ESCAPED: 'escaped',
+    RAW: 'raw',
+    COMMENT: 'comment',
+    LITERAL: 'literal'
+  };
+  Template.prototype = {
+    createRegex: function createRegex() {
+      var str = _REGEX_STRING;
+      var delim = utils.escapeRegExpChars(this.opts.delimiter);
+      var open = utils.escapeRegExpChars(this.opts.openDelimiter);
+      var close = utils.escapeRegExpChars(this.opts.closeDelimiter);
+      str = str.replace(/%/g, delim).replace(/</g, open).replace(/>/g, close);
+      return new RegExp(str);
+    },
+    compile: function compile() {
+      /** @type {string} */
+      var src;
+      /** @type {ClientFunction} */
+      var fn;
+      var opts = this.opts;
+      var prepended = '';
+      var appended = '';
+      /** @type {EscapeCallback} */
+      var escapeFn = opts.escapeFunction;
+      /** @type {FunctionConstructor} */
+      var ctor;
+      /** @type {string} */
+      var sanitizedFilename = opts.filename ? JSON.stringify(opts.filename) : 'undefined';
+      if (!this.source) {
+        this.generateSource();
+        prepended += '  var __output = "";\n' + '  function __append(s) { if (s !== undefined && s !== null) __output += s }\n';
+        if (opts.outputFunctionName) {
+          if (!_JS_IDENTIFIER.test(opts.outputFunctionName)) {
+            throw new Error('outputFunctionName is not a valid JS identifier.');
+          }
+          prepended += '  var ' + opts.outputFunctionName + ' = __append;' + '\n';
+        }
+        if (opts.localsName && !_JS_IDENTIFIER.test(opts.localsName)) {
+          throw new Error('localsName is not a valid JS identifier.');
+        }
+        if (opts.destructuredLocals && opts.destructuredLocals.length) {
+          var destructuring = '  var __locals = (' + opts.localsName + ' || {}),\n';
+          for (var i = 0; i < opts.destructuredLocals.length; i++) {
+            var name = opts.destructuredLocals[i];
+            if (!_JS_IDENTIFIER.test(name)) {
+              throw new Error('destructuredLocals[' + i + '] is not a valid JS identifier.');
+            }
+            if (i > 0) {
+              destructuring += ',\n  ';
+            }
+            destructuring += name + ' = __locals.' + name;
+          }
+          prepended += destructuring + ';\n';
+        }
+        if (opts._with !== false) {
+          prepended += '  with (' + opts.localsName + ' || {}) {' + '\n';
+          appended += '  }' + '\n';
+        }
+        appended += '  return __output;' + '\n';
+        this.source = prepended + this.source + appended;
+      }
+      if (opts.compileDebug) {
+        src = 'var __line = 1' + '\n' + '  , __lines = ' + JSON.stringify(this.templateText) + '\n' + '  , __filename = ' + sanitizedFilename + ';' + '\n' + 'try {' + '\n' + this.source + '} catch (e) {' + '\n' + '  rethrow(e, __lines, __filename, __line, escapeFn);' + '\n' + '}' + '\n';
+      } else {
+        src = this.source;
+      }
+      if (opts.client) {
+        src = 'escapeFn = escapeFn || ' + escapeFn.toString() + ';' + '\n' + src;
+        if (opts.compileDebug) {
+          src = 'rethrow = rethrow || ' + rethrow.toString() + ';' + '\n' + src;
+        }
+      }
+      if (opts.strict) {
+        src = '"use strict";\n' + src;
+      }
+      if (opts.debug) {
+        console.log(src);
+      }
+      if (opts.compileDebug && opts.filename) {
+        src = src + '\n' + '//# sourceURL=' + sanitizedFilename + '\n';
+      }
+      try {
+        if (opts.async) {
+          // Have to use generated function for this, since in envs without support,
+          // it breaks in parsing
+          try {
+            ctor = new Function('return (async function(){}).constructor;')();
+          } catch (e) {
+            if (e instanceof SyntaxError) {
+              throw new Error('This environment does not support async/await');
+            } else {
+              throw e;
+            }
+          }
+        } else {
+          ctor = Function;
+        }
+        fn = new ctor(opts.localsName + ', escapeFn, include, rethrow', src);
+      } catch (e) {
+        // istanbul ignore else
+        if (e instanceof SyntaxError) {
+          if (opts.filename) {
+            e.message += ' in ' + opts.filename;
+          }
+          e.message += ' while compiling ejs\n\n';
+          e.message += 'If the above error is not helpful, you may want to try EJS-Lint:\n';
+          e.message += 'https://github.com/RyanZim/EJS-Lint';
+          if (!opts.async) {
+            e.message += '\n';
+            e.message += 'Or, if you meant to create an async function, pass `async: true` as an option.';
+          }
+        }
+        throw e;
+      }
+
+      // Return a callable function which will execute the function
+      // created by the source-code, with the passed data as locals
+      // Adds a local `include` function which allows full recursive include
+      var returnedFn = opts.client ? fn : function anonymous(data) {
+        var include = function include(path, includeData) {
+          var d = utils.shallowCopy(utils.createNullProtoObjWherePossible(), data);
+          if (includeData) {
+            d = utils.shallowCopy(d, includeData);
+          }
+          return includeFile(path, opts)(d);
+        };
+        return fn.apply(opts.context, [data || utils.createNullProtoObjWherePossible(), escapeFn, include, rethrow]);
+      };
+      if (opts.filename && typeof Object.defineProperty === 'function') {
+        var filename = opts.filename;
+        var basename = path.basename(filename, path.extname(filename));
+        try {
+          Object.defineProperty(returnedFn, 'name', {
+            value: basename,
+            writable: false,
+            enumerable: false,
+            configurable: true
+          });
+        } catch (e) {/* ignore */}
+      }
+      return returnedFn;
+    },
+    generateSource: function generateSource() {
+      var opts = this.opts;
+      if (opts.rmWhitespace) {
+        // Have to use two separate replace here as `^` and `$` operators don't
+        // work well with `\r` and empty lines don't work well with the `m` flag.
+        this.templateText = this.templateText.replace(/[\r\n]+/g, '\n').replace(/^\s+|\s+$/gm, '');
+      }
+
+      // Slurp spaces and tabs before <%_ and after _%>
+      this.templateText = this.templateText.replace(/[ \t]*<%_/gm, '<%_').replace(/_%>[ \t]*/gm, '_%>');
+      var self = this;
+      var matches = this.parseTemplateText();
+      var d = this.opts.delimiter;
+      var o = this.opts.openDelimiter;
+      var c = this.opts.closeDelimiter;
+      if (matches && matches.length) {
+        matches.forEach(function (line, index) {
+          var closing;
+          // If this is an opening tag, check for closing tags
+          // FIXME: May end up with some false positives here
+          // Better to store modes as k/v with openDelimiter + delimiter as key
+          // Then this can simply check against the map
+          if (line.indexOf(o + d) === 0 // If it is a tag
+          && line.indexOf(o + d + d) !== 0) {
+            // and is not escaped
+            closing = matches[index + 2];
+            if (!(closing == d + c || closing == '-' + d + c || closing == '_' + d + c)) {
+              throw new Error('Could not find matching close tag for "' + line + '".');
+            }
+          }
+          self.scanLine(line);
+        });
+      }
+    },
+    parseTemplateText: function parseTemplateText() {
+      var str = this.templateText;
+      var pat = this.regex;
+      var result = pat.exec(str);
+      var arr = [];
+      var firstPos;
+      while (result) {
+        firstPos = result.index;
+        if (firstPos !== 0) {
+          arr.push(str.substring(0, firstPos));
+          str = str.slice(firstPos);
+        }
+        arr.push(result[0]);
+        str = str.slice(result[0].length);
+        result = pat.exec(str);
+      }
+      if (str) {
+        arr.push(str);
+      }
+      return arr;
+    },
+    _addOutput: function _addOutput(line) {
+      if (this.truncate) {
+        // Only replace single leading linebreak in the line after
+        // -%> tag -- this is the single, trailing linebreak
+        // after the tag that the truncation mode replaces
+        // Handle Win / Unix / old Mac linebreaks -- do the \r\n
+        // combo first in the regex-or
+        line = line.replace(/^(?:\r\n|\r|\n)/, '');
+        this.truncate = false;
+      }
+      if (!line) {
+        return line;
+      }
+
+      // Preserve literal slashes
+      line = line.replace(/\\/g, '\\\\');
+
+      // Convert linebreaks
+      line = line.replace(/\n/g, '\\n');
+      line = line.replace(/\r/g, '\\r');
+
+      // Escape double-quotes
+      // - this will be the delimiter during execution
+      line = line.replace(/"/g, '\\"');
+      this.source += '    ; __append("' + line + '")' + '\n';
+    },
+    scanLine: function scanLine(line) {
+      var self = this;
+      var d = this.opts.delimiter;
+      var o = this.opts.openDelimiter;
+      var c = this.opts.closeDelimiter;
+      var newLineCount = 0;
+      newLineCount = line.split('\n').length - 1;
+      switch (line) {
+        case o + d:
+        case o + d + '_':
+          this.mode = Template.modes.EVAL;
+          break;
+        case o + d + '=':
+          this.mode = Template.modes.ESCAPED;
+          break;
+        case o + d + '-':
+          this.mode = Template.modes.RAW;
+          break;
+        case o + d + '#':
+          this.mode = Template.modes.COMMENT;
+          break;
+        case o + d + d:
+          this.mode = Template.modes.LITERAL;
+          this.source += '    ; __append("' + line.replace(o + d + d, o + d) + '")' + '\n';
+          break;
+        case d + d + c:
+          this.mode = Template.modes.LITERAL;
+          this.source += '    ; __append("' + line.replace(d + d + c, d + c) + '")' + '\n';
+          break;
+        case d + c:
+        case '-' + d + c:
+        case '_' + d + c:
+          if (this.mode == Template.modes.LITERAL) {
+            this._addOutput(line);
+          }
+          this.mode = null;
+          this.truncate = line.indexOf('-') === 0 || line.indexOf('_') === 0;
+          break;
+        default:
+          // In script mode, depends on type of tag
+          if (this.mode) {
+            // If '//' is found without a line break, add a line break.
+            switch (this.mode) {
+              case Template.modes.EVAL:
+              case Template.modes.ESCAPED:
+              case Template.modes.RAW:
+                if (line.lastIndexOf('//') > line.lastIndexOf('\n')) {
+                  line += '\n';
+                }
+            }
+            switch (this.mode) {
+              // Just executing code
+              case Template.modes.EVAL:
+                this.source += '    ; ' + line + '\n';
+                break;
+              // Exec, esc, and output
+              case Template.modes.ESCAPED:
+                this.source += '    ; __append(escapeFn(' + stripSemi(line) + '))' + '\n';
+                break;
+              // Exec and output
+              case Template.modes.RAW:
+                this.source += '    ; __append(' + stripSemi(line) + ')' + '\n';
+                break;
+              case Template.modes.COMMENT:
+                // Do nothing
+                break;
+              // Literal <%% mode, append as raw output
+              case Template.modes.LITERAL:
+                this._addOutput(line);
+                break;
+            }
+          }
+          // In string mode, just add the output
+          else {
+            this._addOutput(line);
+          }
+      }
+      if (self.opts.compileDebug && newLineCount) {
+        this.currentLine += newLineCount;
+        this.source += '    ; __line = ' + this.currentLine + '\n';
+      }
+    }
+  };
+
+  /**
+   * Escape characters reserved in XML.
+   *
+   * This is simply an export of {@link module:utils.escapeXML}.
+   *
+   * If `markup` is `undefined` or `null`, the empty string is returned.
+   *
+   * @param {String} markup Input string
+   * @return {String} Escaped string
+   * @public
+   * @func
+   * */
+  exports.escapeXML = utils.escapeXML;
+
+  /**
+   * Express.js support.
+   *
+   * This is an alias for {@link module:ejs.renderFile}, in order to support
+   * Express.js out-of-the-box.
+   *
+   * @func
+   */
+
+  exports.__express = exports.renderFile;
+
+  /**
+   * Version of EJS.
+   *
+   * @readonly
+   * @type {String}
+   * @public
+   */
+
+  exports.VERSION = _VERSION_STRING;
+
+  /**
+   * Name for detection of EJS.
+   *
+   * @readonly
+   * @type {String}
+   * @public
+   */
+
+  exports.name = _NAME;
+
+  /* istanbul ignore if */
+  if (typeof window != 'undefined') {
+    window.ejs = exports;
+  }
+})(ejs$1);
+
+var xml2js$1 = {};
+
+var defaults = {};
+
+var hasRequiredDefaults;
+function requireDefaults() {
+  if (hasRequiredDefaults) return defaults;
+  hasRequiredDefaults = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    defaults.defaults = {
+      "0.1": {
+        explicitCharkey: false,
+        trim: true,
+        normalize: true,
+        normalizeTags: false,
+        attrkey: "@",
+        charkey: "#",
+        explicitArray: false,
+        ignoreAttrs: false,
+        mergeAttrs: false,
+        explicitRoot: false,
+        validator: null,
+        xmlns: false,
+        explicitChildren: false,
+        childkey: '@@',
+        charsAsChildren: false,
+        includeWhiteChars: false,
+        async: false,
+        strict: true,
+        attrNameProcessors: null,
+        attrValueProcessors: null,
+        tagNameProcessors: null,
+        valueProcessors: null,
+        emptyTag: ''
+      },
+      "0.2": {
+        explicitCharkey: false,
+        trim: false,
+        normalize: false,
+        normalizeTags: false,
+        attrkey: "$",
+        charkey: "_",
+        explicitArray: true,
+        ignoreAttrs: false,
+        mergeAttrs: false,
+        explicitRoot: true,
+        validator: null,
+        xmlns: false,
+        explicitChildren: false,
+        preserveChildrenOrder: false,
+        childkey: '$$',
+        charsAsChildren: false,
+        includeWhiteChars: false,
+        async: false,
+        strict: true,
+        attrNameProcessors: null,
+        attrValueProcessors: null,
+        tagNameProcessors: null,
+        valueProcessors: null,
+        rootName: 'root',
+        xmldec: {
+          'version': '1.0',
+          'encoding': 'UTF-8',
+          'standalone': true
+        },
+        doctype: null,
+        renderOpts: {
+          'pretty': true,
+          'indent': '  ',
+          'newline': '\n'
+        },
+        headless: false,
+        chunkSize: 10000,
+        emptyTag: '',
+        cdata: false
+      }
+    };
+  }).call(commonjsGlobal);
+  return defaults;
+}
+
+var builder = {};
+
+var lib$3 = {};
+
+var Utility = {};
+
+var hasRequiredUtility;
+function requireUtility() {
+  if (hasRequiredUtility) return Utility;
+  hasRequiredUtility = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var assign,
+      getValue,
+      isArray,
+      isEmpty,
+      isFunction,
+      isObject,
+      isPlainObject,
+      slice = [].slice,
+      hasProp = {}.hasOwnProperty;
+    assign = function assign() {
+      var i, key, len, source, sources, target;
+      target = arguments[0], sources = 2 <= arguments.length ? slice.call(arguments, 1) : [];
+      if (isFunction(Object.assign)) {
+        Object.assign.apply(null, arguments);
+      } else {
+        for (i = 0, len = sources.length; i < len; i++) {
+          source = sources[i];
+          if (source != null) {
+            for (key in source) {
+              if (!hasProp.call(source, key)) continue;
+              target[key] = source[key];
+            }
+          }
+        }
+      }
+      return target;
+    };
+    isFunction = function isFunction(val) {
+      return !!val && Object.prototype.toString.call(val) === '[object Function]';
+    };
+    isObject = function isObject(val) {
+      var ref;
+      return !!val && ((ref = _typeof(val)) === 'function' || ref === 'object');
+    };
+    isArray = function isArray(val) {
+      if (isFunction(Array.isArray)) {
+        return Array.isArray(val);
+      } else {
+        return Object.prototype.toString.call(val) === '[object Array]';
+      }
+    };
+    isEmpty = function isEmpty(val) {
+      var key;
+      if (isArray(val)) {
+        return !val.length;
+      } else {
+        for (key in val) {
+          if (!hasProp.call(val, key)) continue;
+          return false;
+        }
+        return true;
+      }
+    };
+    isPlainObject = function isPlainObject(val) {
+      var ctor, proto;
+      return isObject(val) && (proto = Object.getPrototypeOf(val)) && (ctor = proto.constructor) && typeof ctor === 'function' && ctor instanceof ctor && Function.prototype.toString.call(ctor) === Function.prototype.toString.call(Object);
+    };
+    getValue = function getValue(obj) {
+      if (isFunction(obj.valueOf)) {
+        return obj.valueOf();
+      } else {
+        return obj;
+      }
+    };
+    Utility.assign = assign;
+    Utility.isFunction = isFunction;
+    Utility.isObject = isObject;
+    Utility.isArray = isArray;
+    Utility.isEmpty = isEmpty;
+    Utility.isPlainObject = isPlainObject;
+    Utility.getValue = getValue;
+  }).call(commonjsGlobal);
+  return Utility;
+}
+
+var XMLDOMImplementation = {exports: {}};
+
+var hasRequiredXMLDOMImplementation;
+function requireXMLDOMImplementation() {
+  if (hasRequiredXMLDOMImplementation) return XMLDOMImplementation.exports;
+  hasRequiredXMLDOMImplementation = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    XMLDOMImplementation.exports = function () {
+      function XMLDOMImplementation() {}
+      XMLDOMImplementation.prototype.hasFeature = function (feature, version) {
+        return true;
+      };
+      XMLDOMImplementation.prototype.createDocumentType = function (qualifiedName, publicId, systemId) {
+        throw new Error("This DOM method is not implemented.");
+      };
+      XMLDOMImplementation.prototype.createDocument = function (namespaceURI, qualifiedName, doctype) {
+        throw new Error("This DOM method is not implemented.");
+      };
+      XMLDOMImplementation.prototype.createHTMLDocument = function (title) {
+        throw new Error("This DOM method is not implemented.");
+      };
+      XMLDOMImplementation.prototype.getFeature = function (feature, version) {
+        throw new Error("This DOM method is not implemented.");
+      };
+      return XMLDOMImplementation;
+    }();
+  }).call(commonjsGlobal);
+  return XMLDOMImplementation.exports;
+}
+
+var XMLDocument = {exports: {}};
+
+var XMLDOMConfiguration = {exports: {}};
+
+var XMLDOMErrorHandler = {exports: {}};
+
+var hasRequiredXMLDOMErrorHandler;
+function requireXMLDOMErrorHandler() {
+  if (hasRequiredXMLDOMErrorHandler) return XMLDOMErrorHandler.exports;
+  hasRequiredXMLDOMErrorHandler = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    XMLDOMErrorHandler.exports = function () {
+      function XMLDOMErrorHandler() {}
+      XMLDOMErrorHandler.prototype.handleError = function (error) {
+        throw new Error(error);
+      };
+      return XMLDOMErrorHandler;
+    }();
+  }).call(commonjsGlobal);
+  return XMLDOMErrorHandler.exports;
+}
+
+var XMLDOMStringList = {exports: {}};
+
+var hasRequiredXMLDOMStringList;
+function requireXMLDOMStringList() {
+  if (hasRequiredXMLDOMStringList) return XMLDOMStringList.exports;
+  hasRequiredXMLDOMStringList = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    XMLDOMStringList.exports = function () {
+      function XMLDOMStringList(arr) {
+        this.arr = arr || [];
+      }
+      Object.defineProperty(XMLDOMStringList.prototype, 'length', {
+        get: function get() {
+          return this.arr.length;
+        }
+      });
+      XMLDOMStringList.prototype.item = function (index) {
+        return this.arr[index] || null;
+      };
+      XMLDOMStringList.prototype.contains = function (str) {
+        return this.arr.indexOf(str) !== -1;
+      };
+      return XMLDOMStringList;
+    }();
+  }).call(commonjsGlobal);
+  return XMLDOMStringList.exports;
+}
+
+var hasRequiredXMLDOMConfiguration;
+function requireXMLDOMConfiguration() {
+  if (hasRequiredXMLDOMConfiguration) return XMLDOMConfiguration.exports;
+  hasRequiredXMLDOMConfiguration = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var XMLDOMErrorHandler, XMLDOMStringList;
+    XMLDOMErrorHandler = requireXMLDOMErrorHandler();
+    XMLDOMStringList = requireXMLDOMStringList();
+    XMLDOMConfiguration.exports = function () {
+      function XMLDOMConfiguration() {
+        this.defaultParams = {
+          "canonical-form": false,
+          "cdata-sections": false,
+          "comments": false,
+          "datatype-normalization": false,
+          "element-content-whitespace": true,
+          "entities": true,
+          "error-handler": new XMLDOMErrorHandler(),
+          "infoset": true,
+          "validate-if-schema": false,
+          "namespaces": true,
+          "namespace-declarations": true,
+          "normalize-characters": false,
+          "schema-location": '',
+          "schema-type": '',
+          "split-cdata-sections": true,
+          "validate": false,
+          "well-formed": true
+        };
+        this.params = Object.create(this.defaultParams);
+      }
+      Object.defineProperty(XMLDOMConfiguration.prototype, 'parameterNames', {
+        get: function get() {
+          return new XMLDOMStringList(Object.keys(this.defaultParams));
+        }
+      });
+      XMLDOMConfiguration.prototype.getParameter = function (name) {
+        if (this.params.hasOwnProperty(name)) {
+          return this.params[name];
+        } else {
+          return null;
+        }
+      };
+      XMLDOMConfiguration.prototype.canSetParameter = function (name, value) {
+        return true;
+      };
+      XMLDOMConfiguration.prototype.setParameter = function (name, value) {
+        if (value != null) {
+          return this.params[name] = value;
+        } else {
+          return delete this.params[name];
+        }
+      };
+      return XMLDOMConfiguration;
+    }();
+  }).call(commonjsGlobal);
+  return XMLDOMConfiguration.exports;
+}
+
+var XMLNode = {exports: {}};
+
+var XMLElement = {exports: {}};
+
+var NodeType = {exports: {}};
+
+var hasRequiredNodeType;
+function requireNodeType() {
+  if (hasRequiredNodeType) return NodeType.exports;
+  hasRequiredNodeType = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    NodeType.exports = {
+      Element: 1,
+      Attribute: 2,
+      Text: 3,
+      CData: 4,
+      EntityReference: 5,
+      EntityDeclaration: 6,
+      ProcessingInstruction: 7,
+      Comment: 8,
+      Document: 9,
+      DocType: 10,
+      DocumentFragment: 11,
+      NotationDeclaration: 12,
+      Declaration: 201,
+      Raw: 202,
+      AttributeDeclaration: 203,
+      ElementDeclaration: 204,
+      Dummy: 205
+    };
+  }).call(commonjsGlobal);
+  return NodeType.exports;
+}
+
+var XMLAttribute = {exports: {}};
+
+var hasRequiredXMLAttribute;
+function requireXMLAttribute() {
+  if (hasRequiredXMLAttribute) return XMLAttribute.exports;
+  hasRequiredXMLAttribute = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType;
+    NodeType = requireNodeType();
+    requireXMLNode();
+    XMLAttribute.exports = function () {
+      function XMLAttribute(parent, name, value) {
+        this.parent = parent;
+        if (this.parent) {
+          this.options = this.parent.options;
+          this.stringify = this.parent.stringify;
+        }
+        if (name == null) {
+          throw new Error("Missing attribute name. " + this.debugInfo(name));
+        }
+        this.name = this.stringify.name(name);
+        this.value = this.stringify.attValue(value);
+        this.type = NodeType.Attribute;
+        this.isId = false;
+        this.schemaTypeInfo = null;
+      }
+      Object.defineProperty(XMLAttribute.prototype, 'nodeType', {
+        get: function get() {
+          return this.type;
+        }
+      });
+      Object.defineProperty(XMLAttribute.prototype, 'ownerElement', {
+        get: function get() {
+          return this.parent;
+        }
+      });
+      Object.defineProperty(XMLAttribute.prototype, 'textContent', {
+        get: function get() {
+          return this.value;
+        },
+        set: function set(value) {
+          return this.value = value || '';
+        }
+      });
+      Object.defineProperty(XMLAttribute.prototype, 'namespaceURI', {
+        get: function get() {
+          return '';
+        }
+      });
+      Object.defineProperty(XMLAttribute.prototype, 'prefix', {
+        get: function get() {
+          return '';
+        }
+      });
+      Object.defineProperty(XMLAttribute.prototype, 'localName', {
+        get: function get() {
+          return this.name;
+        }
+      });
+      Object.defineProperty(XMLAttribute.prototype, 'specified', {
+        get: function get() {
+          return true;
+        }
+      });
+      XMLAttribute.prototype.clone = function () {
+        return Object.create(this);
+      };
+      XMLAttribute.prototype.toString = function (options) {
+        return this.options.writer.attribute(this, this.options.writer.filterOptions(options));
+      };
+      XMLAttribute.prototype.debugInfo = function (name) {
+        name = name || this.name;
+        if (name == null) {
+          return "parent: <" + this.parent.name + ">";
+        } else {
+          return "attribute: {" + name + "}, parent: <" + this.parent.name + ">";
+        }
+      };
+      XMLAttribute.prototype.isEqualNode = function (node) {
+        if (node.namespaceURI !== this.namespaceURI) {
+          return false;
+        }
+        if (node.prefix !== this.prefix) {
+          return false;
+        }
+        if (node.localName !== this.localName) {
+          return false;
+        }
+        if (node.value !== this.value) {
+          return false;
+        }
+        return true;
+      };
+      return XMLAttribute;
+    }();
+  }).call(commonjsGlobal);
+  return XMLAttribute.exports;
+}
+
+var XMLNamedNodeMap = {exports: {}};
+
+var hasRequiredXMLNamedNodeMap;
+function requireXMLNamedNodeMap() {
+  if (hasRequiredXMLNamedNodeMap) return XMLNamedNodeMap.exports;
+  hasRequiredXMLNamedNodeMap = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    XMLNamedNodeMap.exports = function () {
+      function XMLNamedNodeMap(nodes) {
+        this.nodes = nodes;
+      }
+      Object.defineProperty(XMLNamedNodeMap.prototype, 'length', {
+        get: function get() {
+          return Object.keys(this.nodes).length || 0;
+        }
+      });
+      XMLNamedNodeMap.prototype.clone = function () {
+        return this.nodes = null;
+      };
+      XMLNamedNodeMap.prototype.getNamedItem = function (name) {
+        return this.nodes[name];
+      };
+      XMLNamedNodeMap.prototype.setNamedItem = function (node) {
+        var oldNode;
+        oldNode = this.nodes[node.nodeName];
+        this.nodes[node.nodeName] = node;
+        return oldNode || null;
+      };
+      XMLNamedNodeMap.prototype.removeNamedItem = function (name) {
+        var oldNode;
+        oldNode = this.nodes[name];
+        delete this.nodes[name];
+        return oldNode || null;
+      };
+      XMLNamedNodeMap.prototype.item = function (index) {
+        return this.nodes[Object.keys(this.nodes)[index]] || null;
+      };
+      XMLNamedNodeMap.prototype.getNamedItemNS = function (namespaceURI, localName) {
+        throw new Error("This DOM method is not implemented.");
+      };
+      XMLNamedNodeMap.prototype.setNamedItemNS = function (node) {
+        throw new Error("This DOM method is not implemented.");
+      };
+      XMLNamedNodeMap.prototype.removeNamedItemNS = function (namespaceURI, localName) {
+        throw new Error("This DOM method is not implemented.");
+      };
+      return XMLNamedNodeMap;
+    }();
+  }).call(commonjsGlobal);
+  return XMLNamedNodeMap.exports;
+}
+
+var hasRequiredXMLElement;
+function requireXMLElement() {
+  if (hasRequiredXMLElement) return XMLElement.exports;
+  hasRequiredXMLElement = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLAttribute,
+      XMLNamedNodeMap,
+      XMLNode,
+      getValue,
+      isFunction,
+      isObject,
+      ref,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    ref = requireUtility(), isObject = ref.isObject, isFunction = ref.isFunction, getValue = ref.getValue;
+    XMLNode = requireXMLNode();
+    NodeType = requireNodeType();
+    XMLAttribute = requireXMLAttribute();
+    XMLNamedNodeMap = requireXMLNamedNodeMap();
+    XMLElement.exports = function (superClass) {
+      extend(XMLElement, superClass);
+      function XMLElement(parent, name, attributes) {
+        var child, j, len, ref1;
+        XMLElement.__super__.constructor.call(this, parent);
+        if (name == null) {
+          throw new Error("Missing element name. " + this.debugInfo());
+        }
+        this.name = this.stringify.name(name);
+        this.type = NodeType.Element;
+        this.attribs = {};
+        this.schemaTypeInfo = null;
+        if (attributes != null) {
+          this.attribute(attributes);
+        }
+        if (parent.type === NodeType.Document) {
+          this.isRoot = true;
+          this.documentObject = parent;
+          parent.rootObject = this;
+          if (parent.children) {
+            ref1 = parent.children;
+            for (j = 0, len = ref1.length; j < len; j++) {
+              child = ref1[j];
+              if (child.type === NodeType.DocType) {
+                child.name = this.name;
+                break;
+              }
+            }
+          }
+        }
+      }
+      Object.defineProperty(XMLElement.prototype, 'tagName', {
+        get: function get() {
+          return this.name;
+        }
+      });
+      Object.defineProperty(XMLElement.prototype, 'namespaceURI', {
+        get: function get() {
+          return '';
+        }
+      });
+      Object.defineProperty(XMLElement.prototype, 'prefix', {
+        get: function get() {
+          return '';
+        }
+      });
+      Object.defineProperty(XMLElement.prototype, 'localName', {
+        get: function get() {
+          return this.name;
+        }
+      });
+      Object.defineProperty(XMLElement.prototype, 'id', {
+        get: function get() {
+          throw new Error("This DOM method is not implemented." + this.debugInfo());
+        }
+      });
+      Object.defineProperty(XMLElement.prototype, 'className', {
+        get: function get() {
+          throw new Error("This DOM method is not implemented." + this.debugInfo());
+        }
+      });
+      Object.defineProperty(XMLElement.prototype, 'classList', {
+        get: function get() {
+          throw new Error("This DOM method is not implemented." + this.debugInfo());
+        }
+      });
+      Object.defineProperty(XMLElement.prototype, 'attributes', {
+        get: function get() {
+          if (!this.attributeMap || !this.attributeMap.nodes) {
+            this.attributeMap = new XMLNamedNodeMap(this.attribs);
+          }
+          return this.attributeMap;
+        }
+      });
+      XMLElement.prototype.clone = function () {
+        var att, attName, clonedSelf, ref1;
+        clonedSelf = Object.create(this);
+        if (clonedSelf.isRoot) {
+          clonedSelf.documentObject = null;
+        }
+        clonedSelf.attribs = {};
+        ref1 = this.attribs;
+        for (attName in ref1) {
+          if (!hasProp.call(ref1, attName)) continue;
+          att = ref1[attName];
+          clonedSelf.attribs[attName] = att.clone();
+        }
+        clonedSelf.children = [];
+        this.children.forEach(function (child) {
+          var clonedChild;
+          clonedChild = child.clone();
+          clonedChild.parent = clonedSelf;
+          return clonedSelf.children.push(clonedChild);
+        });
+        return clonedSelf;
+      };
+      XMLElement.prototype.attribute = function (name, value) {
+        var attName, attValue;
+        if (name != null) {
+          name = getValue(name);
+        }
+        if (isObject(name)) {
+          for (attName in name) {
+            if (!hasProp.call(name, attName)) continue;
+            attValue = name[attName];
+            this.attribute(attName, attValue);
+          }
+        } else {
+          if (isFunction(value)) {
+            value = value.apply();
+          }
+          if (this.options.keepNullAttributes && value == null) {
+            this.attribs[name] = new XMLAttribute(this, name, "");
+          } else if (value != null) {
+            this.attribs[name] = new XMLAttribute(this, name, value);
+          }
+        }
+        return this;
+      };
+      XMLElement.prototype.removeAttribute = function (name) {
+        var attName, j, len;
+        if (name == null) {
+          throw new Error("Missing attribute name. " + this.debugInfo());
+        }
+        name = getValue(name);
+        if (Array.isArray(name)) {
+          for (j = 0, len = name.length; j < len; j++) {
+            attName = name[j];
+            delete this.attribs[attName];
+          }
+        } else {
+          delete this.attribs[name];
+        }
+        return this;
+      };
+      XMLElement.prototype.toString = function (options) {
+        return this.options.writer.element(this, this.options.writer.filterOptions(options));
+      };
+      XMLElement.prototype.att = function (name, value) {
+        return this.attribute(name, value);
+      };
+      XMLElement.prototype.a = function (name, value) {
+        return this.attribute(name, value);
+      };
+      XMLElement.prototype.getAttribute = function (name) {
+        if (this.attribs.hasOwnProperty(name)) {
+          return this.attribs[name].value;
+        } else {
+          return null;
+        }
+      };
+      XMLElement.prototype.setAttribute = function (name, value) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.getAttributeNode = function (name) {
+        if (this.attribs.hasOwnProperty(name)) {
+          return this.attribs[name];
+        } else {
+          return null;
+        }
+      };
+      XMLElement.prototype.setAttributeNode = function (newAttr) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.removeAttributeNode = function (oldAttr) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.getElementsByTagName = function (name) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.getAttributeNS = function (namespaceURI, localName) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.setAttributeNS = function (namespaceURI, qualifiedName, value) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.removeAttributeNS = function (namespaceURI, localName) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.getAttributeNodeNS = function (namespaceURI, localName) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.setAttributeNodeNS = function (newAttr) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.getElementsByTagNameNS = function (namespaceURI, localName) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.hasAttribute = function (name) {
+        return this.attribs.hasOwnProperty(name);
+      };
+      XMLElement.prototype.hasAttributeNS = function (namespaceURI, localName) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.setIdAttribute = function (name, isId) {
+        if (this.attribs.hasOwnProperty(name)) {
+          return this.attribs[name].isId;
+        } else {
+          return isId;
+        }
+      };
+      XMLElement.prototype.setIdAttributeNS = function (namespaceURI, localName, isId) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.setIdAttributeNode = function (idAttr, isId) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.getElementsByTagName = function (tagname) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.getElementsByTagNameNS = function (namespaceURI, localName) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.getElementsByClassName = function (classNames) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLElement.prototype.isEqualNode = function (node) {
+        var i, j, ref1;
+        if (!XMLElement.__super__.isEqualNode.apply(this, arguments).isEqualNode(node)) {
+          return false;
+        }
+        if (node.namespaceURI !== this.namespaceURI) {
+          return false;
+        }
+        if (node.prefix !== this.prefix) {
+          return false;
+        }
+        if (node.localName !== this.localName) {
+          return false;
+        }
+        if (node.attribs.length !== this.attribs.length) {
+          return false;
+        }
+        for (i = j = 0, ref1 = this.attribs.length - 1; 0 <= ref1 ? j <= ref1 : j >= ref1; i = 0 <= ref1 ? ++j : --j) {
+          if (!this.attribs[i].isEqualNode(node.attribs[i])) {
+            return false;
+          }
+        }
+        return true;
+      };
+      return XMLElement;
+    }(XMLNode);
+  }).call(commonjsGlobal);
+  return XMLElement.exports;
+}
+
+var XMLCData = {exports: {}};
+
+var XMLCharacterData = {exports: {}};
+
+var hasRequiredXMLCharacterData;
+function requireXMLCharacterData() {
+  if (hasRequiredXMLCharacterData) return XMLCharacterData.exports;
+  hasRequiredXMLCharacterData = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var XMLNode,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    XMLNode = requireXMLNode();
+    XMLCharacterData.exports = function (superClass) {
+      extend(XMLCharacterData, superClass);
+      function XMLCharacterData(parent) {
+        XMLCharacterData.__super__.constructor.call(this, parent);
+        this.value = '';
+      }
+      Object.defineProperty(XMLCharacterData.prototype, 'data', {
+        get: function get() {
+          return this.value;
+        },
+        set: function set(value) {
+          return this.value = value || '';
+        }
+      });
+      Object.defineProperty(XMLCharacterData.prototype, 'length', {
+        get: function get() {
+          return this.value.length;
+        }
+      });
+      Object.defineProperty(XMLCharacterData.prototype, 'textContent', {
+        get: function get() {
+          return this.value;
+        },
+        set: function set(value) {
+          return this.value = value || '';
+        }
+      });
+      XMLCharacterData.prototype.clone = function () {
+        return Object.create(this);
+      };
+      XMLCharacterData.prototype.substringData = function (offset, count) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLCharacterData.prototype.appendData = function (arg) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLCharacterData.prototype.insertData = function (offset, arg) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLCharacterData.prototype.deleteData = function (offset, count) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLCharacterData.prototype.replaceData = function (offset, count, arg) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLCharacterData.prototype.isEqualNode = function (node) {
+        if (!XMLCharacterData.__super__.isEqualNode.apply(this, arguments).isEqualNode(node)) {
+          return false;
+        }
+        if (node.data !== this.data) {
+          return false;
+        }
+        return true;
+      };
+      return XMLCharacterData;
+    }(XMLNode);
+  }).call(commonjsGlobal);
+  return XMLCharacterData.exports;
+}
+
+var hasRequiredXMLCData;
+function requireXMLCData() {
+  if (hasRequiredXMLCData) return XMLCData.exports;
+  hasRequiredXMLCData = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLCharacterData,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    NodeType = requireNodeType();
+    XMLCharacterData = requireXMLCharacterData();
+    XMLCData.exports = function (superClass) {
+      extend(XMLCData, superClass);
+      function XMLCData(parent, text) {
+        XMLCData.__super__.constructor.call(this, parent);
+        if (text == null) {
+          throw new Error("Missing CDATA text. " + this.debugInfo());
+        }
+        this.name = "#cdata-section";
+        this.type = NodeType.CData;
+        this.value = this.stringify.cdata(text);
+      }
+      XMLCData.prototype.clone = function () {
+        return Object.create(this);
+      };
+      XMLCData.prototype.toString = function (options) {
+        return this.options.writer.cdata(this, this.options.writer.filterOptions(options));
+      };
+      return XMLCData;
+    }(XMLCharacterData);
+  }).call(commonjsGlobal);
+  return XMLCData.exports;
+}
+
+var XMLComment = {exports: {}};
+
+var hasRequiredXMLComment;
+function requireXMLComment() {
+  if (hasRequiredXMLComment) return XMLComment.exports;
+  hasRequiredXMLComment = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLCharacterData,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    NodeType = requireNodeType();
+    XMLCharacterData = requireXMLCharacterData();
+    XMLComment.exports = function (superClass) {
+      extend(XMLComment, superClass);
+      function XMLComment(parent, text) {
+        XMLComment.__super__.constructor.call(this, parent);
+        if (text == null) {
+          throw new Error("Missing comment text. " + this.debugInfo());
+        }
+        this.name = "#comment";
+        this.type = NodeType.Comment;
+        this.value = this.stringify.comment(text);
+      }
+      XMLComment.prototype.clone = function () {
+        return Object.create(this);
+      };
+      XMLComment.prototype.toString = function (options) {
+        return this.options.writer.comment(this, this.options.writer.filterOptions(options));
+      };
+      return XMLComment;
+    }(XMLCharacterData);
+  }).call(commonjsGlobal);
+  return XMLComment.exports;
+}
+
+var XMLDeclaration = {exports: {}};
+
+var hasRequiredXMLDeclaration;
+function requireXMLDeclaration() {
+  if (hasRequiredXMLDeclaration) return XMLDeclaration.exports;
+  hasRequiredXMLDeclaration = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLNode,
+      isObject,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    isObject = requireUtility().isObject;
+    XMLNode = requireXMLNode();
+    NodeType = requireNodeType();
+    XMLDeclaration.exports = function (superClass) {
+      extend(XMLDeclaration, superClass);
+      function XMLDeclaration(parent, version, encoding, standalone) {
+        var ref;
+        XMLDeclaration.__super__.constructor.call(this, parent);
+        if (isObject(version)) {
+          ref = version, version = ref.version, encoding = ref.encoding, standalone = ref.standalone;
+        }
+        if (!version) {
+          version = '1.0';
+        }
+        this.type = NodeType.Declaration;
+        this.version = this.stringify.xmlVersion(version);
+        if (encoding != null) {
+          this.encoding = this.stringify.xmlEncoding(encoding);
+        }
+        if (standalone != null) {
+          this.standalone = this.stringify.xmlStandalone(standalone);
+        }
+      }
+      XMLDeclaration.prototype.toString = function (options) {
+        return this.options.writer.declaration(this, this.options.writer.filterOptions(options));
+      };
+      return XMLDeclaration;
+    }(XMLNode);
+  }).call(commonjsGlobal);
+  return XMLDeclaration.exports;
+}
+
+var XMLDocType = {exports: {}};
+
+var XMLDTDAttList = {exports: {}};
+
+var hasRequiredXMLDTDAttList;
+function requireXMLDTDAttList() {
+  if (hasRequiredXMLDTDAttList) return XMLDTDAttList.exports;
+  hasRequiredXMLDTDAttList = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLNode,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    XMLNode = requireXMLNode();
+    NodeType = requireNodeType();
+    XMLDTDAttList.exports = function (superClass) {
+      extend(XMLDTDAttList, superClass);
+      function XMLDTDAttList(parent, elementName, attributeName, attributeType, defaultValueType, defaultValue) {
+        XMLDTDAttList.__super__.constructor.call(this, parent);
+        if (elementName == null) {
+          throw new Error("Missing DTD element name. " + this.debugInfo());
+        }
+        if (attributeName == null) {
+          throw new Error("Missing DTD attribute name. " + this.debugInfo(elementName));
+        }
+        if (!attributeType) {
+          throw new Error("Missing DTD attribute type. " + this.debugInfo(elementName));
+        }
+        if (!defaultValueType) {
+          throw new Error("Missing DTD attribute default. " + this.debugInfo(elementName));
+        }
+        if (defaultValueType.indexOf('#') !== 0) {
+          defaultValueType = '#' + defaultValueType;
+        }
+        if (!defaultValueType.match(/^(#REQUIRED|#IMPLIED|#FIXED|#DEFAULT)$/)) {
+          throw new Error("Invalid default value type; expected: #REQUIRED, #IMPLIED, #FIXED or #DEFAULT. " + this.debugInfo(elementName));
+        }
+        if (defaultValue && !defaultValueType.match(/^(#FIXED|#DEFAULT)$/)) {
+          throw new Error("Default value only applies to #FIXED or #DEFAULT. " + this.debugInfo(elementName));
+        }
+        this.elementName = this.stringify.name(elementName);
+        this.type = NodeType.AttributeDeclaration;
+        this.attributeName = this.stringify.name(attributeName);
+        this.attributeType = this.stringify.dtdAttType(attributeType);
+        if (defaultValue) {
+          this.defaultValue = this.stringify.dtdAttDefault(defaultValue);
+        }
+        this.defaultValueType = defaultValueType;
+      }
+      XMLDTDAttList.prototype.toString = function (options) {
+        return this.options.writer.dtdAttList(this, this.options.writer.filterOptions(options));
+      };
+      return XMLDTDAttList;
+    }(XMLNode);
+  }).call(commonjsGlobal);
+  return XMLDTDAttList.exports;
+}
+
+var XMLDTDEntity = {exports: {}};
+
+var hasRequiredXMLDTDEntity;
+function requireXMLDTDEntity() {
+  if (hasRequiredXMLDTDEntity) return XMLDTDEntity.exports;
+  hasRequiredXMLDTDEntity = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLNode,
+      isObject,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    isObject = requireUtility().isObject;
+    XMLNode = requireXMLNode();
+    NodeType = requireNodeType();
+    XMLDTDEntity.exports = function (superClass) {
+      extend(XMLDTDEntity, superClass);
+      function XMLDTDEntity(parent, pe, name, value) {
+        XMLDTDEntity.__super__.constructor.call(this, parent);
+        if (name == null) {
+          throw new Error("Missing DTD entity name. " + this.debugInfo(name));
+        }
+        if (value == null) {
+          throw new Error("Missing DTD entity value. " + this.debugInfo(name));
+        }
+        this.pe = !!pe;
+        this.name = this.stringify.name(name);
+        this.type = NodeType.EntityDeclaration;
+        if (!isObject(value)) {
+          this.value = this.stringify.dtdEntityValue(value);
+          this.internal = true;
+        } else {
+          if (!value.pubID && !value.sysID) {
+            throw new Error("Public and/or system identifiers are required for an external entity. " + this.debugInfo(name));
+          }
+          if (value.pubID && !value.sysID) {
+            throw new Error("System identifier is required for a public external entity. " + this.debugInfo(name));
+          }
+          this.internal = false;
+          if (value.pubID != null) {
+            this.pubID = this.stringify.dtdPubID(value.pubID);
+          }
+          if (value.sysID != null) {
+            this.sysID = this.stringify.dtdSysID(value.sysID);
+          }
+          if (value.nData != null) {
+            this.nData = this.stringify.dtdNData(value.nData);
+          }
+          if (this.pe && this.nData) {
+            throw new Error("Notation declaration is not allowed in a parameter entity. " + this.debugInfo(name));
+          }
+        }
+      }
+      Object.defineProperty(XMLDTDEntity.prototype, 'publicId', {
+        get: function get() {
+          return this.pubID;
+        }
+      });
+      Object.defineProperty(XMLDTDEntity.prototype, 'systemId', {
+        get: function get() {
+          return this.sysID;
+        }
+      });
+      Object.defineProperty(XMLDTDEntity.prototype, 'notationName', {
+        get: function get() {
+          return this.nData || null;
+        }
+      });
+      Object.defineProperty(XMLDTDEntity.prototype, 'inputEncoding', {
+        get: function get() {
+          return null;
+        }
+      });
+      Object.defineProperty(XMLDTDEntity.prototype, 'xmlEncoding', {
+        get: function get() {
+          return null;
+        }
+      });
+      Object.defineProperty(XMLDTDEntity.prototype, 'xmlVersion', {
+        get: function get() {
+          return null;
+        }
+      });
+      XMLDTDEntity.prototype.toString = function (options) {
+        return this.options.writer.dtdEntity(this, this.options.writer.filterOptions(options));
+      };
+      return XMLDTDEntity;
+    }(XMLNode);
+  }).call(commonjsGlobal);
+  return XMLDTDEntity.exports;
+}
+
+var XMLDTDElement = {exports: {}};
+
+var hasRequiredXMLDTDElement;
+function requireXMLDTDElement() {
+  if (hasRequiredXMLDTDElement) return XMLDTDElement.exports;
+  hasRequiredXMLDTDElement = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLNode,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    XMLNode = requireXMLNode();
+    NodeType = requireNodeType();
+    XMLDTDElement.exports = function (superClass) {
+      extend(XMLDTDElement, superClass);
+      function XMLDTDElement(parent, name, value) {
+        XMLDTDElement.__super__.constructor.call(this, parent);
+        if (name == null) {
+          throw new Error("Missing DTD element name. " + this.debugInfo());
+        }
+        if (!value) {
+          value = '(#PCDATA)';
+        }
+        if (Array.isArray(value)) {
+          value = '(' + value.join(',') + ')';
+        }
+        this.name = this.stringify.name(name);
+        this.type = NodeType.ElementDeclaration;
+        this.value = this.stringify.dtdElementValue(value);
+      }
+      XMLDTDElement.prototype.toString = function (options) {
+        return this.options.writer.dtdElement(this, this.options.writer.filterOptions(options));
+      };
+      return XMLDTDElement;
+    }(XMLNode);
+  }).call(commonjsGlobal);
+  return XMLDTDElement.exports;
+}
+
+var XMLDTDNotation = {exports: {}};
+
+var hasRequiredXMLDTDNotation;
+function requireXMLDTDNotation() {
+  if (hasRequiredXMLDTDNotation) return XMLDTDNotation.exports;
+  hasRequiredXMLDTDNotation = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLNode,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    XMLNode = requireXMLNode();
+    NodeType = requireNodeType();
+    XMLDTDNotation.exports = function (superClass) {
+      extend(XMLDTDNotation, superClass);
+      function XMLDTDNotation(parent, name, value) {
+        XMLDTDNotation.__super__.constructor.call(this, parent);
+        if (name == null) {
+          throw new Error("Missing DTD notation name. " + this.debugInfo(name));
+        }
+        if (!value.pubID && !value.sysID) {
+          throw new Error("Public or system identifiers are required for an external entity. " + this.debugInfo(name));
+        }
+        this.name = this.stringify.name(name);
+        this.type = NodeType.NotationDeclaration;
+        if (value.pubID != null) {
+          this.pubID = this.stringify.dtdPubID(value.pubID);
+        }
+        if (value.sysID != null) {
+          this.sysID = this.stringify.dtdSysID(value.sysID);
+        }
+      }
+      Object.defineProperty(XMLDTDNotation.prototype, 'publicId', {
+        get: function get() {
+          return this.pubID;
+        }
+      });
+      Object.defineProperty(XMLDTDNotation.prototype, 'systemId', {
+        get: function get() {
+          return this.sysID;
+        }
+      });
+      XMLDTDNotation.prototype.toString = function (options) {
+        return this.options.writer.dtdNotation(this, this.options.writer.filterOptions(options));
+      };
+      return XMLDTDNotation;
+    }(XMLNode);
+  }).call(commonjsGlobal);
+  return XMLDTDNotation.exports;
+}
+
+var hasRequiredXMLDocType;
+function requireXMLDocType() {
+  if (hasRequiredXMLDocType) return XMLDocType.exports;
+  hasRequiredXMLDocType = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLDTDAttList,
+      XMLDTDElement,
+      XMLDTDEntity,
+      XMLDTDNotation,
+      XMLNamedNodeMap,
+      XMLNode,
+      isObject,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    isObject = requireUtility().isObject;
+    XMLNode = requireXMLNode();
+    NodeType = requireNodeType();
+    XMLDTDAttList = requireXMLDTDAttList();
+    XMLDTDEntity = requireXMLDTDEntity();
+    XMLDTDElement = requireXMLDTDElement();
+    XMLDTDNotation = requireXMLDTDNotation();
+    XMLNamedNodeMap = requireXMLNamedNodeMap();
+    XMLDocType.exports = function (superClass) {
+      extend(XMLDocType, superClass);
+      function XMLDocType(parent, pubID, sysID) {
+        var child, i, len, ref, ref1, ref2;
+        XMLDocType.__super__.constructor.call(this, parent);
+        this.type = NodeType.DocType;
+        if (parent.children) {
+          ref = parent.children;
+          for (i = 0, len = ref.length; i < len; i++) {
+            child = ref[i];
+            if (child.type === NodeType.Element) {
+              this.name = child.name;
+              break;
+            }
+          }
+        }
+        this.documentObject = parent;
+        if (isObject(pubID)) {
+          ref1 = pubID, pubID = ref1.pubID, sysID = ref1.sysID;
+        }
+        if (sysID == null) {
+          ref2 = [pubID, sysID], sysID = ref2[0], pubID = ref2[1];
+        }
+        if (pubID != null) {
+          this.pubID = this.stringify.dtdPubID(pubID);
+        }
+        if (sysID != null) {
+          this.sysID = this.stringify.dtdSysID(sysID);
+        }
+      }
+      Object.defineProperty(XMLDocType.prototype, 'entities', {
+        get: function get() {
+          var child, i, len, nodes, ref;
+          nodes = {};
+          ref = this.children;
+          for (i = 0, len = ref.length; i < len; i++) {
+            child = ref[i];
+            if (child.type === NodeType.EntityDeclaration && !child.pe) {
+              nodes[child.name] = child;
+            }
+          }
+          return new XMLNamedNodeMap(nodes);
+        }
+      });
+      Object.defineProperty(XMLDocType.prototype, 'notations', {
+        get: function get() {
+          var child, i, len, nodes, ref;
+          nodes = {};
+          ref = this.children;
+          for (i = 0, len = ref.length; i < len; i++) {
+            child = ref[i];
+            if (child.type === NodeType.NotationDeclaration) {
+              nodes[child.name] = child;
+            }
+          }
+          return new XMLNamedNodeMap(nodes);
+        }
+      });
+      Object.defineProperty(XMLDocType.prototype, 'publicId', {
+        get: function get() {
+          return this.pubID;
+        }
+      });
+      Object.defineProperty(XMLDocType.prototype, 'systemId', {
+        get: function get() {
+          return this.sysID;
+        }
+      });
+      Object.defineProperty(XMLDocType.prototype, 'internalSubset', {
+        get: function get() {
+          throw new Error("This DOM method is not implemented." + this.debugInfo());
+        }
+      });
+      XMLDocType.prototype.element = function (name, value) {
+        var child;
+        child = new XMLDTDElement(this, name, value);
+        this.children.push(child);
+        return this;
+      };
+      XMLDocType.prototype.attList = function (elementName, attributeName, attributeType, defaultValueType, defaultValue) {
+        var child;
+        child = new XMLDTDAttList(this, elementName, attributeName, attributeType, defaultValueType, defaultValue);
+        this.children.push(child);
+        return this;
+      };
+      XMLDocType.prototype.entity = function (name, value) {
+        var child;
+        child = new XMLDTDEntity(this, false, name, value);
+        this.children.push(child);
+        return this;
+      };
+      XMLDocType.prototype.pEntity = function (name, value) {
+        var child;
+        child = new XMLDTDEntity(this, true, name, value);
+        this.children.push(child);
+        return this;
+      };
+      XMLDocType.prototype.notation = function (name, value) {
+        var child;
+        child = new XMLDTDNotation(this, name, value);
+        this.children.push(child);
+        return this;
+      };
+      XMLDocType.prototype.toString = function (options) {
+        return this.options.writer.docType(this, this.options.writer.filterOptions(options));
+      };
+      XMLDocType.prototype.ele = function (name, value) {
+        return this.element(name, value);
+      };
+      XMLDocType.prototype.att = function (elementName, attributeName, attributeType, defaultValueType, defaultValue) {
+        return this.attList(elementName, attributeName, attributeType, defaultValueType, defaultValue);
+      };
+      XMLDocType.prototype.ent = function (name, value) {
+        return this.entity(name, value);
+      };
+      XMLDocType.prototype.pent = function (name, value) {
+        return this.pEntity(name, value);
+      };
+      XMLDocType.prototype.not = function (name, value) {
+        return this.notation(name, value);
+      };
+      XMLDocType.prototype.up = function () {
+        return this.root() || this.documentObject;
+      };
+      XMLDocType.prototype.isEqualNode = function (node) {
+        if (!XMLDocType.__super__.isEqualNode.apply(this, arguments).isEqualNode(node)) {
+          return false;
+        }
+        if (node.name !== this.name) {
+          return false;
+        }
+        if (node.publicId !== this.publicId) {
+          return false;
+        }
+        if (node.systemId !== this.systemId) {
+          return false;
+        }
+        return true;
+      };
+      return XMLDocType;
+    }(XMLNode);
+  }).call(commonjsGlobal);
+  return XMLDocType.exports;
+}
+
+var XMLRaw = {exports: {}};
+
+var hasRequiredXMLRaw;
+function requireXMLRaw() {
+  if (hasRequiredXMLRaw) return XMLRaw.exports;
+  hasRequiredXMLRaw = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLNode,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    NodeType = requireNodeType();
+    XMLNode = requireXMLNode();
+    XMLRaw.exports = function (superClass) {
+      extend(XMLRaw, superClass);
+      function XMLRaw(parent, text) {
+        XMLRaw.__super__.constructor.call(this, parent);
+        if (text == null) {
+          throw new Error("Missing raw text. " + this.debugInfo());
+        }
+        this.type = NodeType.Raw;
+        this.value = this.stringify.raw(text);
+      }
+      XMLRaw.prototype.clone = function () {
+        return Object.create(this);
+      };
+      XMLRaw.prototype.toString = function (options) {
+        return this.options.writer.raw(this, this.options.writer.filterOptions(options));
+      };
+      return XMLRaw;
+    }(XMLNode);
+  }).call(commonjsGlobal);
+  return XMLRaw.exports;
+}
+
+var XMLText = {exports: {}};
+
+var hasRequiredXMLText;
+function requireXMLText() {
+  if (hasRequiredXMLText) return XMLText.exports;
+  hasRequiredXMLText = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLCharacterData,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    NodeType = requireNodeType();
+    XMLCharacterData = requireXMLCharacterData();
+    XMLText.exports = function (superClass) {
+      extend(XMLText, superClass);
+      function XMLText(parent, text) {
+        XMLText.__super__.constructor.call(this, parent);
+        if (text == null) {
+          throw new Error("Missing element text. " + this.debugInfo());
+        }
+        this.name = "#text";
+        this.type = NodeType.Text;
+        this.value = this.stringify.text(text);
+      }
+      Object.defineProperty(XMLText.prototype, 'isElementContentWhitespace', {
+        get: function get() {
+          throw new Error("This DOM method is not implemented." + this.debugInfo());
+        }
+      });
+      Object.defineProperty(XMLText.prototype, 'wholeText', {
+        get: function get() {
+          var next, prev, str;
+          str = '';
+          prev = this.previousSibling;
+          while (prev) {
+            str = prev.data + str;
+            prev = prev.previousSibling;
+          }
+          str += this.data;
+          next = this.nextSibling;
+          while (next) {
+            str = str + next.data;
+            next = next.nextSibling;
+          }
+          return str;
+        }
+      });
+      XMLText.prototype.clone = function () {
+        return Object.create(this);
+      };
+      XMLText.prototype.toString = function (options) {
+        return this.options.writer.text(this, this.options.writer.filterOptions(options));
+      };
+      XMLText.prototype.splitText = function (offset) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLText.prototype.replaceWholeText = function (content) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      return XMLText;
+    }(XMLCharacterData);
+  }).call(commonjsGlobal);
+  return XMLText.exports;
+}
+
+var XMLProcessingInstruction = {exports: {}};
+
+var hasRequiredXMLProcessingInstruction;
+function requireXMLProcessingInstruction() {
+  if (hasRequiredXMLProcessingInstruction) return XMLProcessingInstruction.exports;
+  hasRequiredXMLProcessingInstruction = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLCharacterData,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    NodeType = requireNodeType();
+    XMLCharacterData = requireXMLCharacterData();
+    XMLProcessingInstruction.exports = function (superClass) {
+      extend(XMLProcessingInstruction, superClass);
+      function XMLProcessingInstruction(parent, target, value) {
+        XMLProcessingInstruction.__super__.constructor.call(this, parent);
+        if (target == null) {
+          throw new Error("Missing instruction target. " + this.debugInfo());
+        }
+        this.type = NodeType.ProcessingInstruction;
+        this.target = this.stringify.insTarget(target);
+        this.name = this.target;
+        if (value) {
+          this.value = this.stringify.insValue(value);
+        }
+      }
+      XMLProcessingInstruction.prototype.clone = function () {
+        return Object.create(this);
+      };
+      XMLProcessingInstruction.prototype.toString = function (options) {
+        return this.options.writer.processingInstruction(this, this.options.writer.filterOptions(options));
+      };
+      XMLProcessingInstruction.prototype.isEqualNode = function (node) {
+        if (!XMLProcessingInstruction.__super__.isEqualNode.apply(this, arguments).isEqualNode(node)) {
+          return false;
+        }
+        if (node.target !== this.target) {
+          return false;
+        }
+        return true;
+      };
+      return XMLProcessingInstruction;
+    }(XMLCharacterData);
+  }).call(commonjsGlobal);
+  return XMLProcessingInstruction.exports;
+}
+
+var XMLDummy = {exports: {}};
+
+var hasRequiredXMLDummy;
+function requireXMLDummy() {
+  if (hasRequiredXMLDummy) return XMLDummy.exports;
+  hasRequiredXMLDummy = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLNode,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    XMLNode = requireXMLNode();
+    NodeType = requireNodeType();
+    XMLDummy.exports = function (superClass) {
+      extend(XMLDummy, superClass);
+      function XMLDummy(parent) {
+        XMLDummy.__super__.constructor.call(this, parent);
+        this.type = NodeType.Dummy;
+      }
+      XMLDummy.prototype.clone = function () {
+        return Object.create(this);
+      };
+      XMLDummy.prototype.toString = function (options) {
+        return '';
+      };
+      return XMLDummy;
+    }(XMLNode);
+  }).call(commonjsGlobal);
+  return XMLDummy.exports;
+}
+
+var XMLNodeList = {exports: {}};
+
+var hasRequiredXMLNodeList;
+function requireXMLNodeList() {
+  if (hasRequiredXMLNodeList) return XMLNodeList.exports;
+  hasRequiredXMLNodeList = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    XMLNodeList.exports = function () {
+      function XMLNodeList(nodes) {
+        this.nodes = nodes;
+      }
+      Object.defineProperty(XMLNodeList.prototype, 'length', {
+        get: function get() {
+          return this.nodes.length || 0;
+        }
+      });
+      XMLNodeList.prototype.clone = function () {
+        return this.nodes = null;
+      };
+      XMLNodeList.prototype.item = function (index) {
+        return this.nodes[index] || null;
+      };
+      return XMLNodeList;
+    }();
+  }).call(commonjsGlobal);
+  return XMLNodeList.exports;
+}
+
+var DocumentPosition = {exports: {}};
+
+var hasRequiredDocumentPosition;
+function requireDocumentPosition() {
+  if (hasRequiredDocumentPosition) return DocumentPosition.exports;
+  hasRequiredDocumentPosition = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    DocumentPosition.exports = {
+      Disconnected: 1,
+      Preceding: 2,
+      Following: 4,
+      Contains: 8,
+      ContainedBy: 16,
+      ImplementationSpecific: 32
+    };
+  }).call(commonjsGlobal);
+  return DocumentPosition.exports;
+}
+
+var hasRequiredXMLNode;
+function requireXMLNode() {
+  if (hasRequiredXMLNode) return XMLNode.exports;
+  hasRequiredXMLNode = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var DocumentPosition,
+      NodeType,
+      XMLCData,
+      XMLComment,
+      XMLDeclaration,
+      XMLDocType,
+      XMLDummy,
+      XMLElement,
+      XMLNodeList,
+      XMLProcessingInstruction,
+      XMLRaw,
+      XMLText,
+      getValue,
+      isEmpty,
+      isFunction,
+      isObject,
+      ref1,
+      hasProp = {}.hasOwnProperty;
+    ref1 = requireUtility(), isObject = ref1.isObject, isFunction = ref1.isFunction, isEmpty = ref1.isEmpty, getValue = ref1.getValue;
+    XMLElement = null;
+    XMLCData = null;
+    XMLComment = null;
+    XMLDeclaration = null;
+    XMLDocType = null;
+    XMLRaw = null;
+    XMLText = null;
+    XMLProcessingInstruction = null;
+    XMLDummy = null;
+    NodeType = null;
+    XMLNodeList = null;
+    DocumentPosition = null;
+    XMLNode.exports = function () {
+      function XMLNode(parent1) {
+        this.parent = parent1;
+        if (this.parent) {
+          this.options = this.parent.options;
+          this.stringify = this.parent.stringify;
+        }
+        this.value = null;
+        this.children = [];
+        this.baseURI = null;
+        if (!XMLElement) {
+          XMLElement = requireXMLElement();
+          XMLCData = requireXMLCData();
+          XMLComment = requireXMLComment();
+          XMLDeclaration = requireXMLDeclaration();
+          XMLDocType = requireXMLDocType();
+          XMLRaw = requireXMLRaw();
+          XMLText = requireXMLText();
+          XMLProcessingInstruction = requireXMLProcessingInstruction();
+          XMLDummy = requireXMLDummy();
+          NodeType = requireNodeType();
+          XMLNodeList = requireXMLNodeList();
+          requireXMLNamedNodeMap();
+          DocumentPosition = requireDocumentPosition();
+        }
+      }
+      Object.defineProperty(XMLNode.prototype, 'nodeName', {
+        get: function get() {
+          return this.name;
+        }
+      });
+      Object.defineProperty(XMLNode.prototype, 'nodeType', {
+        get: function get() {
+          return this.type;
+        }
+      });
+      Object.defineProperty(XMLNode.prototype, 'nodeValue', {
+        get: function get() {
+          return this.value;
+        }
+      });
+      Object.defineProperty(XMLNode.prototype, 'parentNode', {
+        get: function get() {
+          return this.parent;
+        }
+      });
+      Object.defineProperty(XMLNode.prototype, 'childNodes', {
+        get: function get() {
+          if (!this.childNodeList || !this.childNodeList.nodes) {
+            this.childNodeList = new XMLNodeList(this.children);
+          }
+          return this.childNodeList;
+        }
+      });
+      Object.defineProperty(XMLNode.prototype, 'firstChild', {
+        get: function get() {
+          return this.children[0] || null;
+        }
+      });
+      Object.defineProperty(XMLNode.prototype, 'lastChild', {
+        get: function get() {
+          return this.children[this.children.length - 1] || null;
+        }
+      });
+      Object.defineProperty(XMLNode.prototype, 'previousSibling', {
+        get: function get() {
+          var i;
+          i = this.parent.children.indexOf(this);
+          return this.parent.children[i - 1] || null;
+        }
+      });
+      Object.defineProperty(XMLNode.prototype, 'nextSibling', {
+        get: function get() {
+          var i;
+          i = this.parent.children.indexOf(this);
+          return this.parent.children[i + 1] || null;
+        }
+      });
+      Object.defineProperty(XMLNode.prototype, 'ownerDocument', {
+        get: function get() {
+          return this.document() || null;
+        }
+      });
+      Object.defineProperty(XMLNode.prototype, 'textContent', {
+        get: function get() {
+          var child, j, len, ref2, str;
+          if (this.nodeType === NodeType.Element || this.nodeType === NodeType.DocumentFragment) {
+            str = '';
+            ref2 = this.children;
+            for (j = 0, len = ref2.length; j < len; j++) {
+              child = ref2[j];
+              if (child.textContent) {
+                str += child.textContent;
+              }
+            }
+            return str;
+          } else {
+            return null;
+          }
+        },
+        set: function set(value) {
+          throw new Error("This DOM method is not implemented." + this.debugInfo());
+        }
+      });
+      XMLNode.prototype.setParent = function (parent) {
+        var child, j, len, ref2, results;
+        this.parent = parent;
+        if (parent) {
+          this.options = parent.options;
+          this.stringify = parent.stringify;
+        }
+        ref2 = this.children;
+        results = [];
+        for (j = 0, len = ref2.length; j < len; j++) {
+          child = ref2[j];
+          results.push(child.setParent(this));
+        }
+        return results;
+      };
+      XMLNode.prototype.element = function (name, attributes, text) {
+        var childNode, item, j, k, key, lastChild, len, len1, ref2, ref3, val;
+        lastChild = null;
+        if (attributes === null && text == null) {
+          ref2 = [{}, null], attributes = ref2[0], text = ref2[1];
+        }
+        if (attributes == null) {
+          attributes = {};
+        }
+        attributes = getValue(attributes);
+        if (!isObject(attributes)) {
+          ref3 = [attributes, text], text = ref3[0], attributes = ref3[1];
+        }
+        if (name != null) {
+          name = getValue(name);
+        }
+        if (Array.isArray(name)) {
+          for (j = 0, len = name.length; j < len; j++) {
+            item = name[j];
+            lastChild = this.element(item);
+          }
+        } else if (isFunction(name)) {
+          lastChild = this.element(name.apply());
+        } else if (isObject(name)) {
+          for (key in name) {
+            if (!hasProp.call(name, key)) continue;
+            val = name[key];
+            if (isFunction(val)) {
+              val = val.apply();
+            }
+            if (!this.options.ignoreDecorators && this.stringify.convertAttKey && key.indexOf(this.stringify.convertAttKey) === 0) {
+              lastChild = this.attribute(key.substr(this.stringify.convertAttKey.length), val);
+            } else if (!this.options.separateArrayItems && Array.isArray(val) && isEmpty(val)) {
+              lastChild = this.dummy();
+            } else if (isObject(val) && isEmpty(val)) {
+              lastChild = this.element(key);
+            } else if (!this.options.keepNullNodes && val == null) {
+              lastChild = this.dummy();
+            } else if (!this.options.separateArrayItems && Array.isArray(val)) {
+              for (k = 0, len1 = val.length; k < len1; k++) {
+                item = val[k];
+                childNode = {};
+                childNode[key] = item;
+                lastChild = this.element(childNode);
+              }
+            } else if (isObject(val)) {
+              if (!this.options.ignoreDecorators && this.stringify.convertTextKey && key.indexOf(this.stringify.convertTextKey) === 0) {
+                lastChild = this.element(val);
+              } else {
+                lastChild = this.element(key);
+                lastChild.element(val);
+              }
+            } else {
+              lastChild = this.element(key, val);
+            }
+          }
+        } else if (!this.options.keepNullNodes && text === null) {
+          lastChild = this.dummy();
+        } else {
+          if (!this.options.ignoreDecorators && this.stringify.convertTextKey && name.indexOf(this.stringify.convertTextKey) === 0) {
+            lastChild = this.text(text);
+          } else if (!this.options.ignoreDecorators && this.stringify.convertCDataKey && name.indexOf(this.stringify.convertCDataKey) === 0) {
+            lastChild = this.cdata(text);
+          } else if (!this.options.ignoreDecorators && this.stringify.convertCommentKey && name.indexOf(this.stringify.convertCommentKey) === 0) {
+            lastChild = this.comment(text);
+          } else if (!this.options.ignoreDecorators && this.stringify.convertRawKey && name.indexOf(this.stringify.convertRawKey) === 0) {
+            lastChild = this.raw(text);
+          } else if (!this.options.ignoreDecorators && this.stringify.convertPIKey && name.indexOf(this.stringify.convertPIKey) === 0) {
+            lastChild = this.instruction(name.substr(this.stringify.convertPIKey.length), text);
+          } else {
+            lastChild = this.node(name, attributes, text);
+          }
+        }
+        if (lastChild == null) {
+          throw new Error("Could not create any elements with: " + name + ". " + this.debugInfo());
+        }
+        return lastChild;
+      };
+      XMLNode.prototype.insertBefore = function (name, attributes, text) {
+        var child, i, newChild, refChild, removed;
+        if (name != null ? name.type : void 0) {
+          newChild = name;
+          refChild = attributes;
+          newChild.setParent(this);
+          if (refChild) {
+            i = children.indexOf(refChild);
+            removed = children.splice(i);
+            children.push(newChild);
+            Array.prototype.push.apply(children, removed);
+          } else {
+            children.push(newChild);
+          }
+          return newChild;
+        } else {
+          if (this.isRoot) {
+            throw new Error("Cannot insert elements at root level. " + this.debugInfo(name));
+          }
+          i = this.parent.children.indexOf(this);
+          removed = this.parent.children.splice(i);
+          child = this.parent.element(name, attributes, text);
+          Array.prototype.push.apply(this.parent.children, removed);
+          return child;
+        }
+      };
+      XMLNode.prototype.insertAfter = function (name, attributes, text) {
+        var child, i, removed;
+        if (this.isRoot) {
+          throw new Error("Cannot insert elements at root level. " + this.debugInfo(name));
+        }
+        i = this.parent.children.indexOf(this);
+        removed = this.parent.children.splice(i + 1);
+        child = this.parent.element(name, attributes, text);
+        Array.prototype.push.apply(this.parent.children, removed);
+        return child;
+      };
+      XMLNode.prototype.remove = function () {
+        var i;
+        if (this.isRoot) {
+          throw new Error("Cannot remove the root element. " + this.debugInfo());
+        }
+        i = this.parent.children.indexOf(this);
+        [].splice.apply(this.parent.children, [i, i - i + 1].concat([]));
+        return this.parent;
+      };
+      XMLNode.prototype.node = function (name, attributes, text) {
+        var child, ref2;
+        if (name != null) {
+          name = getValue(name);
+        }
+        attributes || (attributes = {});
+        attributes = getValue(attributes);
+        if (!isObject(attributes)) {
+          ref2 = [attributes, text], text = ref2[0], attributes = ref2[1];
+        }
+        child = new XMLElement(this, name, attributes);
+        if (text != null) {
+          child.text(text);
+        }
+        this.children.push(child);
+        return child;
+      };
+      XMLNode.prototype.text = function (value) {
+        var child;
+        if (isObject(value)) {
+          this.element(value);
+        }
+        child = new XMLText(this, value);
+        this.children.push(child);
+        return this;
+      };
+      XMLNode.prototype.cdata = function (value) {
+        var child;
+        child = new XMLCData(this, value);
+        this.children.push(child);
+        return this;
+      };
+      XMLNode.prototype.comment = function (value) {
+        var child;
+        child = new XMLComment(this, value);
+        this.children.push(child);
+        return this;
+      };
+      XMLNode.prototype.commentBefore = function (value) {
+        var i, removed;
+        i = this.parent.children.indexOf(this);
+        removed = this.parent.children.splice(i);
+        this.parent.comment(value);
+        Array.prototype.push.apply(this.parent.children, removed);
+        return this;
+      };
+      XMLNode.prototype.commentAfter = function (value) {
+        var i, removed;
+        i = this.parent.children.indexOf(this);
+        removed = this.parent.children.splice(i + 1);
+        this.parent.comment(value);
+        Array.prototype.push.apply(this.parent.children, removed);
+        return this;
+      };
+      XMLNode.prototype.raw = function (value) {
+        var child;
+        child = new XMLRaw(this, value);
+        this.children.push(child);
+        return this;
+      };
+      XMLNode.prototype.dummy = function () {
+        var child;
+        child = new XMLDummy(this);
+        return child;
+      };
+      XMLNode.prototype.instruction = function (target, value) {
+        var insTarget, insValue, instruction, j, len;
+        if (target != null) {
+          target = getValue(target);
+        }
+        if (value != null) {
+          value = getValue(value);
+        }
+        if (Array.isArray(target)) {
+          for (j = 0, len = target.length; j < len; j++) {
+            insTarget = target[j];
+            this.instruction(insTarget);
+          }
+        } else if (isObject(target)) {
+          for (insTarget in target) {
+            if (!hasProp.call(target, insTarget)) continue;
+            insValue = target[insTarget];
+            this.instruction(insTarget, insValue);
+          }
+        } else {
+          if (isFunction(value)) {
+            value = value.apply();
+          }
+          instruction = new XMLProcessingInstruction(this, target, value);
+          this.children.push(instruction);
+        }
+        return this;
+      };
+      XMLNode.prototype.instructionBefore = function (target, value) {
+        var i, removed;
+        i = this.parent.children.indexOf(this);
+        removed = this.parent.children.splice(i);
+        this.parent.instruction(target, value);
+        Array.prototype.push.apply(this.parent.children, removed);
+        return this;
+      };
+      XMLNode.prototype.instructionAfter = function (target, value) {
+        var i, removed;
+        i = this.parent.children.indexOf(this);
+        removed = this.parent.children.splice(i + 1);
+        this.parent.instruction(target, value);
+        Array.prototype.push.apply(this.parent.children, removed);
+        return this;
+      };
+      XMLNode.prototype.declaration = function (version, encoding, standalone) {
+        var doc, xmldec;
+        doc = this.document();
+        xmldec = new XMLDeclaration(doc, version, encoding, standalone);
+        if (doc.children.length === 0) {
+          doc.children.unshift(xmldec);
+        } else if (doc.children[0].type === NodeType.Declaration) {
+          doc.children[0] = xmldec;
+        } else {
+          doc.children.unshift(xmldec);
+        }
+        return doc.root() || doc;
+      };
+      XMLNode.prototype.dtd = function (pubID, sysID) {
+        var child, doc, doctype, i, j, k, len, len1, ref2, ref3;
+        doc = this.document();
+        doctype = new XMLDocType(doc, pubID, sysID);
+        ref2 = doc.children;
+        for (i = j = 0, len = ref2.length; j < len; i = ++j) {
+          child = ref2[i];
+          if (child.type === NodeType.DocType) {
+            doc.children[i] = doctype;
+            return doctype;
+          }
+        }
+        ref3 = doc.children;
+        for (i = k = 0, len1 = ref3.length; k < len1; i = ++k) {
+          child = ref3[i];
+          if (child.isRoot) {
+            doc.children.splice(i, 0, doctype);
+            return doctype;
+          }
+        }
+        doc.children.push(doctype);
+        return doctype;
+      };
+      XMLNode.prototype.up = function () {
+        if (this.isRoot) {
+          throw new Error("The root node has no parent. Use doc() if you need to get the document object.");
+        }
+        return this.parent;
+      };
+      XMLNode.prototype.root = function () {
+        var node;
+        node = this;
+        while (node) {
+          if (node.type === NodeType.Document) {
+            return node.rootObject;
+          } else if (node.isRoot) {
+            return node;
+          } else {
+            node = node.parent;
+          }
+        }
+      };
+      XMLNode.prototype.document = function () {
+        var node;
+        node = this;
+        while (node) {
+          if (node.type === NodeType.Document) {
+            return node;
+          } else {
+            node = node.parent;
+          }
+        }
+      };
+      XMLNode.prototype.end = function (options) {
+        return this.document().end(options);
+      };
+      XMLNode.prototype.prev = function () {
+        var i;
+        i = this.parent.children.indexOf(this);
+        if (i < 1) {
+          throw new Error("Already at the first node. " + this.debugInfo());
+        }
+        return this.parent.children[i - 1];
+      };
+      XMLNode.prototype.next = function () {
+        var i;
+        i = this.parent.children.indexOf(this);
+        if (i === -1 || i === this.parent.children.length - 1) {
+          throw new Error("Already at the last node. " + this.debugInfo());
+        }
+        return this.parent.children[i + 1];
+      };
+      XMLNode.prototype.importDocument = function (doc) {
+        var clonedRoot;
+        clonedRoot = doc.root().clone();
+        clonedRoot.parent = this;
+        clonedRoot.isRoot = false;
+        this.children.push(clonedRoot);
+        return this;
+      };
+      XMLNode.prototype.debugInfo = function (name) {
+        var ref2, ref3;
+        name = name || this.name;
+        if (name == null && !((ref2 = this.parent) != null ? ref2.name : void 0)) {
+          return "";
+        } else if (name == null) {
+          return "parent: <" + this.parent.name + ">";
+        } else if (!((ref3 = this.parent) != null ? ref3.name : void 0)) {
+          return "node: <" + name + ">";
+        } else {
+          return "node: <" + name + ">, parent: <" + this.parent.name + ">";
+        }
+      };
+      XMLNode.prototype.ele = function (name, attributes, text) {
+        return this.element(name, attributes, text);
+      };
+      XMLNode.prototype.nod = function (name, attributes, text) {
+        return this.node(name, attributes, text);
+      };
+      XMLNode.prototype.txt = function (value) {
+        return this.text(value);
+      };
+      XMLNode.prototype.dat = function (value) {
+        return this.cdata(value);
+      };
+      XMLNode.prototype.com = function (value) {
+        return this.comment(value);
+      };
+      XMLNode.prototype.ins = function (target, value) {
+        return this.instruction(target, value);
+      };
+      XMLNode.prototype.doc = function () {
+        return this.document();
+      };
+      XMLNode.prototype.dec = function (version, encoding, standalone) {
+        return this.declaration(version, encoding, standalone);
+      };
+      XMLNode.prototype.e = function (name, attributes, text) {
+        return this.element(name, attributes, text);
+      };
+      XMLNode.prototype.n = function (name, attributes, text) {
+        return this.node(name, attributes, text);
+      };
+      XMLNode.prototype.t = function (value) {
+        return this.text(value);
+      };
+      XMLNode.prototype.d = function (value) {
+        return this.cdata(value);
+      };
+      XMLNode.prototype.c = function (value) {
+        return this.comment(value);
+      };
+      XMLNode.prototype.r = function (value) {
+        return this.raw(value);
+      };
+      XMLNode.prototype.i = function (target, value) {
+        return this.instruction(target, value);
+      };
+      XMLNode.prototype.u = function () {
+        return this.up();
+      };
+      XMLNode.prototype.importXMLBuilder = function (doc) {
+        return this.importDocument(doc);
+      };
+      XMLNode.prototype.replaceChild = function (newChild, oldChild) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLNode.prototype.removeChild = function (oldChild) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLNode.prototype.appendChild = function (newChild) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLNode.prototype.hasChildNodes = function () {
+        return this.children.length !== 0;
+      };
+      XMLNode.prototype.cloneNode = function (deep) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLNode.prototype.normalize = function () {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLNode.prototype.isSupported = function (feature, version) {
+        return true;
+      };
+      XMLNode.prototype.hasAttributes = function () {
+        return this.attribs.length !== 0;
+      };
+      XMLNode.prototype.compareDocumentPosition = function (other) {
+        var ref, res;
+        ref = this;
+        if (ref === other) {
+          return 0;
+        } else if (this.document() !== other.document()) {
+          res = DocumentPosition.Disconnected | DocumentPosition.ImplementationSpecific;
+          if (Math.random() < 0.5) {
+            res |= DocumentPosition.Preceding;
+          } else {
+            res |= DocumentPosition.Following;
+          }
+          return res;
+        } else if (ref.isAncestor(other)) {
+          return DocumentPosition.Contains | DocumentPosition.Preceding;
+        } else if (ref.isDescendant(other)) {
+          return DocumentPosition.Contains | DocumentPosition.Following;
+        } else if (ref.isPreceding(other)) {
+          return DocumentPosition.Preceding;
+        } else {
+          return DocumentPosition.Following;
+        }
+      };
+      XMLNode.prototype.isSameNode = function (other) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLNode.prototype.lookupPrefix = function (namespaceURI) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLNode.prototype.isDefaultNamespace = function (namespaceURI) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLNode.prototype.lookupNamespaceURI = function (prefix) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLNode.prototype.isEqualNode = function (node) {
+        var i, j, ref2;
+        if (node.nodeType !== this.nodeType) {
+          return false;
+        }
+        if (node.children.length !== this.children.length) {
+          return false;
+        }
+        for (i = j = 0, ref2 = this.children.length - 1; 0 <= ref2 ? j <= ref2 : j >= ref2; i = 0 <= ref2 ? ++j : --j) {
+          if (!this.children[i].isEqualNode(node.children[i])) {
+            return false;
+          }
+        }
+        return true;
+      };
+      XMLNode.prototype.getFeature = function (feature, version) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLNode.prototype.setUserData = function (key, data, handler) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLNode.prototype.getUserData = function (key) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLNode.prototype.contains = function (other) {
+        if (!other) {
+          return false;
+        }
+        return other === this || this.isDescendant(other);
+      };
+      XMLNode.prototype.isDescendant = function (node) {
+        var child, isDescendantChild, j, len, ref2;
+        ref2 = this.children;
+        for (j = 0, len = ref2.length; j < len; j++) {
+          child = ref2[j];
+          if (node === child) {
+            return true;
+          }
+          isDescendantChild = child.isDescendant(node);
+          if (isDescendantChild) {
+            return true;
+          }
+        }
+        return false;
+      };
+      XMLNode.prototype.isAncestor = function (node) {
+        return node.isDescendant(this);
+      };
+      XMLNode.prototype.isPreceding = function (node) {
+        var nodePos, thisPos;
+        nodePos = this.treePosition(node);
+        thisPos = this.treePosition(this);
+        if (nodePos === -1 || thisPos === -1) {
+          return false;
+        } else {
+          return nodePos < thisPos;
+        }
+      };
+      XMLNode.prototype.isFollowing = function (node) {
+        var nodePos, thisPos;
+        nodePos = this.treePosition(node);
+        thisPos = this.treePosition(this);
+        if (nodePos === -1 || thisPos === -1) {
+          return false;
+        } else {
+          return nodePos > thisPos;
+        }
+      };
+      XMLNode.prototype.treePosition = function (node) {
+        var found, pos;
+        pos = 0;
+        found = false;
+        this.foreachTreeNode(this.document(), function (childNode) {
+          pos++;
+          if (!found && childNode === node) {
+            return found = true;
+          }
+        });
+        if (found) {
+          return pos;
+        } else {
+          return -1;
+        }
+      };
+      XMLNode.prototype.foreachTreeNode = function (node, func) {
+        var child, j, len, ref2, res;
+        node || (node = this.document());
+        ref2 = node.children;
+        for (j = 0, len = ref2.length; j < len; j++) {
+          child = ref2[j];
+          if (res = func(child)) {
+            return res;
+          } else {
+            res = this.foreachTreeNode(child, func);
+            if (res) {
+              return res;
+            }
+          }
+        }
+      };
+      return XMLNode;
+    }();
+  }).call(commonjsGlobal);
+  return XMLNode.exports;
+}
+
+var XMLStringifier = {exports: {}};
+
+var hasRequiredXMLStringifier;
+function requireXMLStringifier() {
+  if (hasRequiredXMLStringifier) return XMLStringifier.exports;
+  hasRequiredXMLStringifier = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var bind = function bind(fn, me) {
+        return function () {
+          return fn.apply(me, arguments);
+        };
+      },
+      hasProp = {}.hasOwnProperty;
+    XMLStringifier.exports = function () {
+      function XMLStringifier(options) {
+        this.assertLegalName = bind(this.assertLegalName, this);
+        this.assertLegalChar = bind(this.assertLegalChar, this);
+        var key, ref, value;
+        options || (options = {});
+        this.options = options;
+        if (!this.options.version) {
+          this.options.version = '1.0';
+        }
+        ref = options.stringify || {};
+        for (key in ref) {
+          if (!hasProp.call(ref, key)) continue;
+          value = ref[key];
+          this[key] = value;
+        }
+      }
+      XMLStringifier.prototype.name = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        return this.assertLegalName('' + val || '');
+      };
+      XMLStringifier.prototype.text = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        return this.assertLegalChar(this.textEscape('' + val || ''));
+      };
+      XMLStringifier.prototype.cdata = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        val = '' + val || '';
+        val = val.replace(']]>', ']]]]><![CDATA[>');
+        return this.assertLegalChar(val);
+      };
+      XMLStringifier.prototype.comment = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        val = '' + val || '';
+        if (val.match(/--/)) {
+          throw new Error("Comment text cannot contain double-hypen: " + val);
+        }
+        return this.assertLegalChar(val);
+      };
+      XMLStringifier.prototype.raw = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        return '' + val || '';
+      };
+      XMLStringifier.prototype.attValue = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        return this.assertLegalChar(this.attEscape(val = '' + val || ''));
+      };
+      XMLStringifier.prototype.insTarget = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        return this.assertLegalChar('' + val || '');
+      };
+      XMLStringifier.prototype.insValue = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        val = '' + val || '';
+        if (val.match(/\?>/)) {
+          throw new Error("Invalid processing instruction value: " + val);
+        }
+        return this.assertLegalChar(val);
+      };
+      XMLStringifier.prototype.xmlVersion = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        val = '' + val || '';
+        if (!val.match(/1\.[0-9]+/)) {
+          throw new Error("Invalid version number: " + val);
+        }
+        return val;
+      };
+      XMLStringifier.prototype.xmlEncoding = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        val = '' + val || '';
+        if (!val.match(/^[A-Za-z](?:[A-Za-z0-9._-])*$/)) {
+          throw new Error("Invalid encoding: " + val);
+        }
+        return this.assertLegalChar(val);
+      };
+      XMLStringifier.prototype.xmlStandalone = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        if (val) {
+          return "yes";
+        } else {
+          return "no";
+        }
+      };
+      XMLStringifier.prototype.dtdPubID = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        return this.assertLegalChar('' + val || '');
+      };
+      XMLStringifier.prototype.dtdSysID = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        return this.assertLegalChar('' + val || '');
+      };
+      XMLStringifier.prototype.dtdElementValue = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        return this.assertLegalChar('' + val || '');
+      };
+      XMLStringifier.prototype.dtdAttType = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        return this.assertLegalChar('' + val || '');
+      };
+      XMLStringifier.prototype.dtdAttDefault = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        return this.assertLegalChar('' + val || '');
+      };
+      XMLStringifier.prototype.dtdEntityValue = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        return this.assertLegalChar('' + val || '');
+      };
+      XMLStringifier.prototype.dtdNData = function (val) {
+        if (this.options.noValidation) {
+          return val;
+        }
+        return this.assertLegalChar('' + val || '');
+      };
+      XMLStringifier.prototype.convertAttKey = '@';
+      XMLStringifier.prototype.convertPIKey = '?';
+      XMLStringifier.prototype.convertTextKey = '#text';
+      XMLStringifier.prototype.convertCDataKey = '#cdata';
+      XMLStringifier.prototype.convertCommentKey = '#comment';
+      XMLStringifier.prototype.convertRawKey = '#raw';
+      XMLStringifier.prototype.assertLegalChar = function (str) {
+        var regex, res;
+        if (this.options.noValidation) {
+          return str;
+        }
+        regex = '';
+        if (this.options.version === '1.0') {
+          regex = /[\0-\x08\x0B\f\x0E-\x1F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/;
+          if (res = str.match(regex)) {
+            throw new Error("Invalid character in string: " + str + " at index " + res.index);
+          }
+        } else if (this.options.version === '1.1') {
+          regex = /[\0\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:[^\uD800-\uDBFF]|^)[\uDC00-\uDFFF]/;
+          if (res = str.match(regex)) {
+            throw new Error("Invalid character in string: " + str + " at index " + res.index);
+          }
+        }
+        return str;
+      };
+      XMLStringifier.prototype.assertLegalName = function (str) {
+        var regex;
+        if (this.options.noValidation) {
+          return str;
+        }
+        this.assertLegalChar(str);
+        regex = /^([:A-Z_a-z\xC0-\xD6\xD8-\xF6\xF8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]|[\uD800-\uDB7F][\uDC00-\uDFFF])([\x2D\.0-:A-Z_a-z\xB7\xC0-\xD6\xD8-\xF6\xF8-\u037D\u037F-\u1FFF\u200C\u200D\u203F\u2040\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]|[\uD800-\uDB7F][\uDC00-\uDFFF])*$/;
+        if (!str.match(regex)) {
+          throw new Error("Invalid character in name");
+        }
+        return str;
+      };
+      XMLStringifier.prototype.textEscape = function (str) {
+        var ampregex;
+        if (this.options.noValidation) {
+          return str;
+        }
+        ampregex = this.options.noDoubleEncoding ? /(?!&\S+;)&/g : /&/g;
+        return str.replace(ampregex, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r/g, '&#xD;');
+      };
+      XMLStringifier.prototype.attEscape = function (str) {
+        var ampregex;
+        if (this.options.noValidation) {
+          return str;
+        }
+        ampregex = this.options.noDoubleEncoding ? /(?!&\S+;)&/g : /&/g;
+        return str.replace(ampregex, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;').replace(/\t/g, '&#x9;').replace(/\n/g, '&#xA;').replace(/\r/g, '&#xD;');
+      };
+      return XMLStringifier;
+    }();
+  }).call(commonjsGlobal);
+  return XMLStringifier.exports;
+}
+
+var XMLStringWriter = {exports: {}};
+
+var XMLWriterBase = {exports: {}};
+
+var WriterState = {exports: {}};
+
+var hasRequiredWriterState;
+function requireWriterState() {
+  if (hasRequiredWriterState) return WriterState.exports;
+  hasRequiredWriterState = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    WriterState.exports = {
+      None: 0,
+      OpenTag: 1,
+      InsideTag: 2,
+      CloseTag: 3
+    };
+  }).call(commonjsGlobal);
+  return WriterState.exports;
+}
+
+var hasRequiredXMLWriterBase;
+function requireXMLWriterBase() {
+  if (hasRequiredXMLWriterBase) return XMLWriterBase.exports;
+  hasRequiredXMLWriterBase = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      WriterState,
+      assign,
+      hasProp = {}.hasOwnProperty;
+    assign = requireUtility().assign;
+    NodeType = requireNodeType();
+    requireXMLDeclaration();
+    requireXMLDocType();
+    requireXMLCData();
+    requireXMLComment();
+    requireXMLElement();
+    requireXMLRaw();
+    requireXMLText();
+    requireXMLProcessingInstruction();
+    requireXMLDummy();
+    requireXMLDTDAttList();
+    requireXMLDTDElement();
+    requireXMLDTDEntity();
+    requireXMLDTDNotation();
+    WriterState = requireWriterState();
+    XMLWriterBase.exports = function () {
+      function XMLWriterBase(options) {
+        var key, ref, value;
+        options || (options = {});
+        this.options = options;
+        ref = options.writer || {};
+        for (key in ref) {
+          if (!hasProp.call(ref, key)) continue;
+          value = ref[key];
+          this["_" + key] = this[key];
+          this[key] = value;
+        }
+      }
+      XMLWriterBase.prototype.filterOptions = function (options) {
+        var filteredOptions, ref, ref1, ref2, ref3, ref4, ref5, ref6;
+        options || (options = {});
+        options = assign({}, this.options, options);
+        filteredOptions = {
+          writer: this
+        };
+        filteredOptions.pretty = options.pretty || false;
+        filteredOptions.allowEmpty = options.allowEmpty || false;
+        filteredOptions.indent = (ref = options.indent) != null ? ref : '  ';
+        filteredOptions.newline = (ref1 = options.newline) != null ? ref1 : '\n';
+        filteredOptions.offset = (ref2 = options.offset) != null ? ref2 : 0;
+        filteredOptions.dontPrettyTextNodes = (ref3 = (ref4 = options.dontPrettyTextNodes) != null ? ref4 : options.dontprettytextnodes) != null ? ref3 : 0;
+        filteredOptions.spaceBeforeSlash = (ref5 = (ref6 = options.spaceBeforeSlash) != null ? ref6 : options.spacebeforeslash) != null ? ref5 : '';
+        if (filteredOptions.spaceBeforeSlash === true) {
+          filteredOptions.spaceBeforeSlash = ' ';
+        }
+        filteredOptions.suppressPrettyCount = 0;
+        filteredOptions.user = {};
+        filteredOptions.state = WriterState.None;
+        return filteredOptions;
+      };
+      XMLWriterBase.prototype.indent = function (node, options, level) {
+        var indentLevel;
+        if (!options.pretty || options.suppressPrettyCount) {
+          return '';
+        } else if (options.pretty) {
+          indentLevel = (level || 0) + options.offset + 1;
+          if (indentLevel > 0) {
+            return new Array(indentLevel).join(options.indent);
+          }
+        }
+        return '';
+      };
+      XMLWriterBase.prototype.endline = function (node, options, level) {
+        if (!options.pretty || options.suppressPrettyCount) {
+          return '';
+        } else {
+          return options.newline;
+        }
+      };
+      XMLWriterBase.prototype.attribute = function (att, options, level) {
+        var r;
+        this.openAttribute(att, options, level);
+        r = ' ' + att.name + '="' + att.value + '"';
+        this.closeAttribute(att, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.cdata = function (node, options, level) {
+        var r;
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        r = this.indent(node, options, level) + '<![CDATA[';
+        options.state = WriterState.InsideTag;
+        r += node.value;
+        options.state = WriterState.CloseTag;
+        r += ']]>' + this.endline(node, options, level);
+        options.state = WriterState.None;
+        this.closeNode(node, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.comment = function (node, options, level) {
+        var r;
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        r = this.indent(node, options, level) + '<!-- ';
+        options.state = WriterState.InsideTag;
+        r += node.value;
+        options.state = WriterState.CloseTag;
+        r += ' -->' + this.endline(node, options, level);
+        options.state = WriterState.None;
+        this.closeNode(node, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.declaration = function (node, options, level) {
+        var r;
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        r = this.indent(node, options, level) + '<?xml';
+        options.state = WriterState.InsideTag;
+        r += ' version="' + node.version + '"';
+        if (node.encoding != null) {
+          r += ' encoding="' + node.encoding + '"';
+        }
+        if (node.standalone != null) {
+          r += ' standalone="' + node.standalone + '"';
+        }
+        options.state = WriterState.CloseTag;
+        r += options.spaceBeforeSlash + '?>';
+        r += this.endline(node, options, level);
+        options.state = WriterState.None;
+        this.closeNode(node, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.docType = function (node, options, level) {
+        var child, i, len, r, ref;
+        level || (level = 0);
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        r = this.indent(node, options, level);
+        r += '<!DOCTYPE ' + node.root().name;
+        if (node.pubID && node.sysID) {
+          r += ' PUBLIC "' + node.pubID + '" "' + node.sysID + '"';
+        } else if (node.sysID) {
+          r += ' SYSTEM "' + node.sysID + '"';
+        }
+        if (node.children.length > 0) {
+          r += ' [';
+          r += this.endline(node, options, level);
+          options.state = WriterState.InsideTag;
+          ref = node.children;
+          for (i = 0, len = ref.length; i < len; i++) {
+            child = ref[i];
+            r += this.writeChildNode(child, options, level + 1);
+          }
+          options.state = WriterState.CloseTag;
+          r += ']';
+        }
+        options.state = WriterState.CloseTag;
+        r += options.spaceBeforeSlash + '>';
+        r += this.endline(node, options, level);
+        options.state = WriterState.None;
+        this.closeNode(node, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.element = function (node, options, level) {
+        var att, child, childNodeCount, firstChildNode, i, j, len, len1, name, prettySuppressed, r, ref, ref1, ref2;
+        level || (level = 0);
+        prettySuppressed = false;
+        r = '';
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        r += this.indent(node, options, level) + '<' + node.name;
+        ref = node.attribs;
+        for (name in ref) {
+          if (!hasProp.call(ref, name)) continue;
+          att = ref[name];
+          r += this.attribute(att, options, level);
+        }
+        childNodeCount = node.children.length;
+        firstChildNode = childNodeCount === 0 ? null : node.children[0];
+        if (childNodeCount === 0 || node.children.every(function (e) {
+          return (e.type === NodeType.Text || e.type === NodeType.Raw) && e.value === '';
+        })) {
+          if (options.allowEmpty) {
+            r += '>';
+            options.state = WriterState.CloseTag;
+            r += '</' + node.name + '>' + this.endline(node, options, level);
+          } else {
+            options.state = WriterState.CloseTag;
+            r += options.spaceBeforeSlash + '/>' + this.endline(node, options, level);
+          }
+        } else if (options.pretty && childNodeCount === 1 && (firstChildNode.type === NodeType.Text || firstChildNode.type === NodeType.Raw) && firstChildNode.value != null) {
+          r += '>';
+          options.state = WriterState.InsideTag;
+          options.suppressPrettyCount++;
+          prettySuppressed = true;
+          r += this.writeChildNode(firstChildNode, options, level + 1);
+          options.suppressPrettyCount--;
+          prettySuppressed = false;
+          options.state = WriterState.CloseTag;
+          r += '</' + node.name + '>' + this.endline(node, options, level);
+        } else {
+          if (options.dontPrettyTextNodes) {
+            ref1 = node.children;
+            for (i = 0, len = ref1.length; i < len; i++) {
+              child = ref1[i];
+              if ((child.type === NodeType.Text || child.type === NodeType.Raw) && child.value != null) {
+                options.suppressPrettyCount++;
+                prettySuppressed = true;
+                break;
+              }
+            }
+          }
+          r += '>' + this.endline(node, options, level);
+          options.state = WriterState.InsideTag;
+          ref2 = node.children;
+          for (j = 0, len1 = ref2.length; j < len1; j++) {
+            child = ref2[j];
+            r += this.writeChildNode(child, options, level + 1);
+          }
+          options.state = WriterState.CloseTag;
+          r += this.indent(node, options, level) + '</' + node.name + '>';
+          if (prettySuppressed) {
+            options.suppressPrettyCount--;
+          }
+          r += this.endline(node, options, level);
+          options.state = WriterState.None;
+        }
+        this.closeNode(node, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.writeChildNode = function (node, options, level) {
+        switch (node.type) {
+          case NodeType.CData:
+            return this.cdata(node, options, level);
+          case NodeType.Comment:
+            return this.comment(node, options, level);
+          case NodeType.Element:
+            return this.element(node, options, level);
+          case NodeType.Raw:
+            return this.raw(node, options, level);
+          case NodeType.Text:
+            return this.text(node, options, level);
+          case NodeType.ProcessingInstruction:
+            return this.processingInstruction(node, options, level);
+          case NodeType.Dummy:
+            return '';
+          case NodeType.Declaration:
+            return this.declaration(node, options, level);
+          case NodeType.DocType:
+            return this.docType(node, options, level);
+          case NodeType.AttributeDeclaration:
+            return this.dtdAttList(node, options, level);
+          case NodeType.ElementDeclaration:
+            return this.dtdElement(node, options, level);
+          case NodeType.EntityDeclaration:
+            return this.dtdEntity(node, options, level);
+          case NodeType.NotationDeclaration:
+            return this.dtdNotation(node, options, level);
+          default:
+            throw new Error("Unknown XML node type: " + node.constructor.name);
+        }
+      };
+      XMLWriterBase.prototype.processingInstruction = function (node, options, level) {
+        var r;
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        r = this.indent(node, options, level) + '<?';
+        options.state = WriterState.InsideTag;
+        r += node.target;
+        if (node.value) {
+          r += ' ' + node.value;
+        }
+        options.state = WriterState.CloseTag;
+        r += options.spaceBeforeSlash + '?>';
+        r += this.endline(node, options, level);
+        options.state = WriterState.None;
+        this.closeNode(node, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.raw = function (node, options, level) {
+        var r;
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        r = this.indent(node, options, level);
+        options.state = WriterState.InsideTag;
+        r += node.value;
+        options.state = WriterState.CloseTag;
+        r += this.endline(node, options, level);
+        options.state = WriterState.None;
+        this.closeNode(node, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.text = function (node, options, level) {
+        var r;
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        r = this.indent(node, options, level);
+        options.state = WriterState.InsideTag;
+        r += node.value;
+        options.state = WriterState.CloseTag;
+        r += this.endline(node, options, level);
+        options.state = WriterState.None;
+        this.closeNode(node, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.dtdAttList = function (node, options, level) {
+        var r;
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        r = this.indent(node, options, level) + '<!ATTLIST';
+        options.state = WriterState.InsideTag;
+        r += ' ' + node.elementName + ' ' + node.attributeName + ' ' + node.attributeType;
+        if (node.defaultValueType !== '#DEFAULT') {
+          r += ' ' + node.defaultValueType;
+        }
+        if (node.defaultValue) {
+          r += ' "' + node.defaultValue + '"';
+        }
+        options.state = WriterState.CloseTag;
+        r += options.spaceBeforeSlash + '>' + this.endline(node, options, level);
+        options.state = WriterState.None;
+        this.closeNode(node, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.dtdElement = function (node, options, level) {
+        var r;
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        r = this.indent(node, options, level) + '<!ELEMENT';
+        options.state = WriterState.InsideTag;
+        r += ' ' + node.name + ' ' + node.value;
+        options.state = WriterState.CloseTag;
+        r += options.spaceBeforeSlash + '>' + this.endline(node, options, level);
+        options.state = WriterState.None;
+        this.closeNode(node, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.dtdEntity = function (node, options, level) {
+        var r;
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        r = this.indent(node, options, level) + '<!ENTITY';
+        options.state = WriterState.InsideTag;
+        if (node.pe) {
+          r += ' %';
+        }
+        r += ' ' + node.name;
+        if (node.value) {
+          r += ' "' + node.value + '"';
+        } else {
+          if (node.pubID && node.sysID) {
+            r += ' PUBLIC "' + node.pubID + '" "' + node.sysID + '"';
+          } else if (node.sysID) {
+            r += ' SYSTEM "' + node.sysID + '"';
+          }
+          if (node.nData) {
+            r += ' NDATA ' + node.nData;
+          }
+        }
+        options.state = WriterState.CloseTag;
+        r += options.spaceBeforeSlash + '>' + this.endline(node, options, level);
+        options.state = WriterState.None;
+        this.closeNode(node, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.dtdNotation = function (node, options, level) {
+        var r;
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        r = this.indent(node, options, level) + '<!NOTATION';
+        options.state = WriterState.InsideTag;
+        r += ' ' + node.name;
+        if (node.pubID && node.sysID) {
+          r += ' PUBLIC "' + node.pubID + '" "' + node.sysID + '"';
+        } else if (node.pubID) {
+          r += ' PUBLIC "' + node.pubID + '"';
+        } else if (node.sysID) {
+          r += ' SYSTEM "' + node.sysID + '"';
+        }
+        options.state = WriterState.CloseTag;
+        r += options.spaceBeforeSlash + '>' + this.endline(node, options, level);
+        options.state = WriterState.None;
+        this.closeNode(node, options, level);
+        return r;
+      };
+      XMLWriterBase.prototype.openNode = function (node, options, level) {};
+      XMLWriterBase.prototype.closeNode = function (node, options, level) {};
+      XMLWriterBase.prototype.openAttribute = function (att, options, level) {};
+      XMLWriterBase.prototype.closeAttribute = function (att, options, level) {};
+      return XMLWriterBase;
+    }();
+  }).call(commonjsGlobal);
+  return XMLWriterBase.exports;
+}
+
+var hasRequiredXMLStringWriter;
+function requireXMLStringWriter() {
+  if (hasRequiredXMLStringWriter) return XMLStringWriter.exports;
+  hasRequiredXMLStringWriter = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var XMLWriterBase,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    XMLWriterBase = requireXMLWriterBase();
+    XMLStringWriter.exports = function (superClass) {
+      extend(XMLStringWriter, superClass);
+      function XMLStringWriter(options) {
+        XMLStringWriter.__super__.constructor.call(this, options);
+      }
+      XMLStringWriter.prototype.document = function (doc, options) {
+        var child, i, len, r, ref;
+        options = this.filterOptions(options);
+        r = '';
+        ref = doc.children;
+        for (i = 0, len = ref.length; i < len; i++) {
+          child = ref[i];
+          r += this.writeChildNode(child, options, 0);
+        }
+        if (options.pretty && r.slice(-options.newline.length) === options.newline) {
+          r = r.slice(0, -options.newline.length);
+        }
+        return r;
+      };
+      return XMLStringWriter;
+    }(XMLWriterBase);
+  }).call(commonjsGlobal);
+  return XMLStringWriter.exports;
+}
+
+var hasRequiredXMLDocument;
+function requireXMLDocument() {
+  if (hasRequiredXMLDocument) return XMLDocument.exports;
+  hasRequiredXMLDocument = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      XMLDOMConfiguration,
+      XMLDOMImplementation,
+      XMLNode,
+      XMLStringWriter,
+      XMLStringifier,
+      isPlainObject,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    isPlainObject = requireUtility().isPlainObject;
+    XMLDOMImplementation = requireXMLDOMImplementation();
+    XMLDOMConfiguration = requireXMLDOMConfiguration();
+    XMLNode = requireXMLNode();
+    NodeType = requireNodeType();
+    XMLStringifier = requireXMLStringifier();
+    XMLStringWriter = requireXMLStringWriter();
+    XMLDocument.exports = function (superClass) {
+      extend(XMLDocument, superClass);
+      function XMLDocument(options) {
+        XMLDocument.__super__.constructor.call(this, null);
+        this.name = "#document";
+        this.type = NodeType.Document;
+        this.documentURI = null;
+        this.domConfig = new XMLDOMConfiguration();
+        options || (options = {});
+        if (!options.writer) {
+          options.writer = new XMLStringWriter();
+        }
+        this.options = options;
+        this.stringify = new XMLStringifier(options);
+      }
+      Object.defineProperty(XMLDocument.prototype, 'implementation', {
+        value: new XMLDOMImplementation()
+      });
+      Object.defineProperty(XMLDocument.prototype, 'doctype', {
+        get: function get() {
+          var child, i, len, ref;
+          ref = this.children;
+          for (i = 0, len = ref.length; i < len; i++) {
+            child = ref[i];
+            if (child.type === NodeType.DocType) {
+              return child;
+            }
+          }
+          return null;
+        }
+      });
+      Object.defineProperty(XMLDocument.prototype, 'documentElement', {
+        get: function get() {
+          return this.rootObject || null;
+        }
+      });
+      Object.defineProperty(XMLDocument.prototype, 'inputEncoding', {
+        get: function get() {
+          return null;
+        }
+      });
+      Object.defineProperty(XMLDocument.prototype, 'strictErrorChecking', {
+        get: function get() {
+          return false;
+        }
+      });
+      Object.defineProperty(XMLDocument.prototype, 'xmlEncoding', {
+        get: function get() {
+          if (this.children.length !== 0 && this.children[0].type === NodeType.Declaration) {
+            return this.children[0].encoding;
+          } else {
+            return null;
+          }
+        }
+      });
+      Object.defineProperty(XMLDocument.prototype, 'xmlStandalone', {
+        get: function get() {
+          if (this.children.length !== 0 && this.children[0].type === NodeType.Declaration) {
+            return this.children[0].standalone === 'yes';
+          } else {
+            return false;
+          }
+        }
+      });
+      Object.defineProperty(XMLDocument.prototype, 'xmlVersion', {
+        get: function get() {
+          if (this.children.length !== 0 && this.children[0].type === NodeType.Declaration) {
+            return this.children[0].version;
+          } else {
+            return "1.0";
+          }
+        }
+      });
+      Object.defineProperty(XMLDocument.prototype, 'URL', {
+        get: function get() {
+          return this.documentURI;
+        }
+      });
+      Object.defineProperty(XMLDocument.prototype, 'origin', {
+        get: function get() {
+          return null;
+        }
+      });
+      Object.defineProperty(XMLDocument.prototype, 'compatMode', {
+        get: function get() {
+          return null;
+        }
+      });
+      Object.defineProperty(XMLDocument.prototype, 'characterSet', {
+        get: function get() {
+          return null;
+        }
+      });
+      Object.defineProperty(XMLDocument.prototype, 'contentType', {
+        get: function get() {
+          return null;
+        }
+      });
+      XMLDocument.prototype.end = function (writer) {
+        var writerOptions;
+        writerOptions = {};
+        if (!writer) {
+          writer = this.options.writer;
+        } else if (isPlainObject(writer)) {
+          writerOptions = writer;
+          writer = this.options.writer;
+        }
+        return writer.document(this, writer.filterOptions(writerOptions));
+      };
+      XMLDocument.prototype.toString = function (options) {
+        return this.options.writer.document(this, this.options.writer.filterOptions(options));
+      };
+      XMLDocument.prototype.createElement = function (tagName) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createDocumentFragment = function () {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createTextNode = function (data) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createComment = function (data) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createCDATASection = function (data) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createProcessingInstruction = function (target, data) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createAttribute = function (name) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createEntityReference = function (name) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.getElementsByTagName = function (tagname) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.importNode = function (importedNode, deep) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createElementNS = function (namespaceURI, qualifiedName) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createAttributeNS = function (namespaceURI, qualifiedName) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.getElementsByTagNameNS = function (namespaceURI, localName) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.getElementById = function (elementId) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.adoptNode = function (source) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.normalizeDocument = function () {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.renameNode = function (node, namespaceURI, qualifiedName) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.getElementsByClassName = function (classNames) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createEvent = function (eventInterface) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createRange = function () {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createNodeIterator = function (root, whatToShow, filter) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      XMLDocument.prototype.createTreeWalker = function (root, whatToShow, filter) {
+        throw new Error("This DOM method is not implemented." + this.debugInfo());
+      };
+      return XMLDocument;
+    }(XMLNode);
+  }).call(commonjsGlobal);
+  return XMLDocument.exports;
+}
+
+var XMLDocumentCB = {exports: {}};
+
+var hasRequiredXMLDocumentCB;
+function requireXMLDocumentCB() {
+  if (hasRequiredXMLDocumentCB) return XMLDocumentCB.exports;
+  hasRequiredXMLDocumentCB = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      WriterState,
+      XMLAttribute,
+      XMLCData,
+      XMLComment,
+      XMLDTDAttList,
+      XMLDTDElement,
+      XMLDTDEntity,
+      XMLDTDNotation,
+      XMLDeclaration,
+      XMLDocType,
+      XMLDocument,
+      XMLElement,
+      XMLProcessingInstruction,
+      XMLRaw,
+      XMLStringWriter,
+      XMLStringifier,
+      XMLText,
+      getValue,
+      isFunction,
+      isObject,
+      isPlainObject,
+      ref,
+      hasProp = {}.hasOwnProperty;
+    ref = requireUtility(), isObject = ref.isObject, isFunction = ref.isFunction, isPlainObject = ref.isPlainObject, getValue = ref.getValue;
+    NodeType = requireNodeType();
+    XMLDocument = requireXMLDocument();
+    XMLElement = requireXMLElement();
+    XMLCData = requireXMLCData();
+    XMLComment = requireXMLComment();
+    XMLRaw = requireXMLRaw();
+    XMLText = requireXMLText();
+    XMLProcessingInstruction = requireXMLProcessingInstruction();
+    XMLDeclaration = requireXMLDeclaration();
+    XMLDocType = requireXMLDocType();
+    XMLDTDAttList = requireXMLDTDAttList();
+    XMLDTDEntity = requireXMLDTDEntity();
+    XMLDTDElement = requireXMLDTDElement();
+    XMLDTDNotation = requireXMLDTDNotation();
+    XMLAttribute = requireXMLAttribute();
+    XMLStringifier = requireXMLStringifier();
+    XMLStringWriter = requireXMLStringWriter();
+    WriterState = requireWriterState();
+    XMLDocumentCB.exports = function () {
+      function XMLDocumentCB(options, onData, onEnd) {
+        var writerOptions;
+        this.name = "?xml";
+        this.type = NodeType.Document;
+        options || (options = {});
+        writerOptions = {};
+        if (!options.writer) {
+          options.writer = new XMLStringWriter();
+        } else if (isPlainObject(options.writer)) {
+          writerOptions = options.writer;
+          options.writer = new XMLStringWriter();
+        }
+        this.options = options;
+        this.writer = options.writer;
+        this.writerOptions = this.writer.filterOptions(writerOptions);
+        this.stringify = new XMLStringifier(options);
+        this.onDataCallback = onData || function () {};
+        this.onEndCallback = onEnd || function () {};
+        this.currentNode = null;
+        this.currentLevel = -1;
+        this.openTags = {};
+        this.documentStarted = false;
+        this.documentCompleted = false;
+        this.root = null;
+      }
+      XMLDocumentCB.prototype.createChildNode = function (node) {
+        var att, attName, attributes, child, i, len, ref1, ref2;
+        switch (node.type) {
+          case NodeType.CData:
+            this.cdata(node.value);
+            break;
+          case NodeType.Comment:
+            this.comment(node.value);
+            break;
+          case NodeType.Element:
+            attributes = {};
+            ref1 = node.attribs;
+            for (attName in ref1) {
+              if (!hasProp.call(ref1, attName)) continue;
+              att = ref1[attName];
+              attributes[attName] = att.value;
+            }
+            this.node(node.name, attributes);
+            break;
+          case NodeType.Dummy:
+            this.dummy();
+            break;
+          case NodeType.Raw:
+            this.raw(node.value);
+            break;
+          case NodeType.Text:
+            this.text(node.value);
+            break;
+          case NodeType.ProcessingInstruction:
+            this.instruction(node.target, node.value);
+            break;
+          default:
+            throw new Error("This XML node type is not supported in a JS object: " + node.constructor.name);
+        }
+        ref2 = node.children;
+        for (i = 0, len = ref2.length; i < len; i++) {
+          child = ref2[i];
+          this.createChildNode(child);
+          if (child.type === NodeType.Element) {
+            this.up();
+          }
+        }
+        return this;
+      };
+      XMLDocumentCB.prototype.dummy = function () {
+        return this;
+      };
+      XMLDocumentCB.prototype.node = function (name, attributes, text) {
+        var ref1;
+        if (name == null) {
+          throw new Error("Missing node name.");
+        }
+        if (this.root && this.currentLevel === -1) {
+          throw new Error("Document can only have one root node. " + this.debugInfo(name));
+        }
+        this.openCurrent();
+        name = getValue(name);
+        if (attributes == null) {
+          attributes = {};
+        }
+        attributes = getValue(attributes);
+        if (!isObject(attributes)) {
+          ref1 = [attributes, text], text = ref1[0], attributes = ref1[1];
+        }
+        this.currentNode = new XMLElement(this, name, attributes);
+        this.currentNode.children = false;
+        this.currentLevel++;
+        this.openTags[this.currentLevel] = this.currentNode;
+        if (text != null) {
+          this.text(text);
+        }
+        return this;
+      };
+      XMLDocumentCB.prototype.element = function (name, attributes, text) {
+        var child, i, len, oldValidationFlag, ref1, root;
+        if (this.currentNode && this.currentNode.type === NodeType.DocType) {
+          this.dtdElement.apply(this, arguments);
+        } else {
+          if (Array.isArray(name) || isObject(name) || isFunction(name)) {
+            oldValidationFlag = this.options.noValidation;
+            this.options.noValidation = true;
+            root = new XMLDocument(this.options).element('TEMP_ROOT');
+            root.element(name);
+            this.options.noValidation = oldValidationFlag;
+            ref1 = root.children;
+            for (i = 0, len = ref1.length; i < len; i++) {
+              child = ref1[i];
+              this.createChildNode(child);
+              if (child.type === NodeType.Element) {
+                this.up();
+              }
+            }
+          } else {
+            this.node(name, attributes, text);
+          }
+        }
+        return this;
+      };
+      XMLDocumentCB.prototype.attribute = function (name, value) {
+        var attName, attValue;
+        if (!this.currentNode || this.currentNode.children) {
+          throw new Error("att() can only be used immediately after an ele() call in callback mode. " + this.debugInfo(name));
+        }
+        if (name != null) {
+          name = getValue(name);
+        }
+        if (isObject(name)) {
+          for (attName in name) {
+            if (!hasProp.call(name, attName)) continue;
+            attValue = name[attName];
+            this.attribute(attName, attValue);
+          }
+        } else {
+          if (isFunction(value)) {
+            value = value.apply();
+          }
+          if (this.options.keepNullAttributes && value == null) {
+            this.currentNode.attribs[name] = new XMLAttribute(this, name, "");
+          } else if (value != null) {
+            this.currentNode.attribs[name] = new XMLAttribute(this, name, value);
+          }
+        }
+        return this;
+      };
+      XMLDocumentCB.prototype.text = function (value) {
+        var node;
+        this.openCurrent();
+        node = new XMLText(this, value);
+        this.onData(this.writer.text(node, this.writerOptions, this.currentLevel + 1), this.currentLevel + 1);
+        return this;
+      };
+      XMLDocumentCB.prototype.cdata = function (value) {
+        var node;
+        this.openCurrent();
+        node = new XMLCData(this, value);
+        this.onData(this.writer.cdata(node, this.writerOptions, this.currentLevel + 1), this.currentLevel + 1);
+        return this;
+      };
+      XMLDocumentCB.prototype.comment = function (value) {
+        var node;
+        this.openCurrent();
+        node = new XMLComment(this, value);
+        this.onData(this.writer.comment(node, this.writerOptions, this.currentLevel + 1), this.currentLevel + 1);
+        return this;
+      };
+      XMLDocumentCB.prototype.raw = function (value) {
+        var node;
+        this.openCurrent();
+        node = new XMLRaw(this, value);
+        this.onData(this.writer.raw(node, this.writerOptions, this.currentLevel + 1), this.currentLevel + 1);
+        return this;
+      };
+      XMLDocumentCB.prototype.instruction = function (target, value) {
+        var i, insTarget, insValue, len, node;
+        this.openCurrent();
+        if (target != null) {
+          target = getValue(target);
+        }
+        if (value != null) {
+          value = getValue(value);
+        }
+        if (Array.isArray(target)) {
+          for (i = 0, len = target.length; i < len; i++) {
+            insTarget = target[i];
+            this.instruction(insTarget);
+          }
+        } else if (isObject(target)) {
+          for (insTarget in target) {
+            if (!hasProp.call(target, insTarget)) continue;
+            insValue = target[insTarget];
+            this.instruction(insTarget, insValue);
+          }
+        } else {
+          if (isFunction(value)) {
+            value = value.apply();
+          }
+          node = new XMLProcessingInstruction(this, target, value);
+          this.onData(this.writer.processingInstruction(node, this.writerOptions, this.currentLevel + 1), this.currentLevel + 1);
+        }
+        return this;
+      };
+      XMLDocumentCB.prototype.declaration = function (version, encoding, standalone) {
+        var node;
+        this.openCurrent();
+        if (this.documentStarted) {
+          throw new Error("declaration() must be the first node.");
+        }
+        node = new XMLDeclaration(this, version, encoding, standalone);
+        this.onData(this.writer.declaration(node, this.writerOptions, this.currentLevel + 1), this.currentLevel + 1);
+        return this;
+      };
+      XMLDocumentCB.prototype.doctype = function (root, pubID, sysID) {
+        this.openCurrent();
+        if (root == null) {
+          throw new Error("Missing root node name.");
+        }
+        if (this.root) {
+          throw new Error("dtd() must come before the root node.");
+        }
+        this.currentNode = new XMLDocType(this, pubID, sysID);
+        this.currentNode.rootNodeName = root;
+        this.currentNode.children = false;
+        this.currentLevel++;
+        this.openTags[this.currentLevel] = this.currentNode;
+        return this;
+      };
+      XMLDocumentCB.prototype.dtdElement = function (name, value) {
+        var node;
+        this.openCurrent();
+        node = new XMLDTDElement(this, name, value);
+        this.onData(this.writer.dtdElement(node, this.writerOptions, this.currentLevel + 1), this.currentLevel + 1);
+        return this;
+      };
+      XMLDocumentCB.prototype.attList = function (elementName, attributeName, attributeType, defaultValueType, defaultValue) {
+        var node;
+        this.openCurrent();
+        node = new XMLDTDAttList(this, elementName, attributeName, attributeType, defaultValueType, defaultValue);
+        this.onData(this.writer.dtdAttList(node, this.writerOptions, this.currentLevel + 1), this.currentLevel + 1);
+        return this;
+      };
+      XMLDocumentCB.prototype.entity = function (name, value) {
+        var node;
+        this.openCurrent();
+        node = new XMLDTDEntity(this, false, name, value);
+        this.onData(this.writer.dtdEntity(node, this.writerOptions, this.currentLevel + 1), this.currentLevel + 1);
+        return this;
+      };
+      XMLDocumentCB.prototype.pEntity = function (name, value) {
+        var node;
+        this.openCurrent();
+        node = new XMLDTDEntity(this, true, name, value);
+        this.onData(this.writer.dtdEntity(node, this.writerOptions, this.currentLevel + 1), this.currentLevel + 1);
+        return this;
+      };
+      XMLDocumentCB.prototype.notation = function (name, value) {
+        var node;
+        this.openCurrent();
+        node = new XMLDTDNotation(this, name, value);
+        this.onData(this.writer.dtdNotation(node, this.writerOptions, this.currentLevel + 1), this.currentLevel + 1);
+        return this;
+      };
+      XMLDocumentCB.prototype.up = function () {
+        if (this.currentLevel < 0) {
+          throw new Error("The document node has no parent.");
+        }
+        if (this.currentNode) {
+          if (this.currentNode.children) {
+            this.closeNode(this.currentNode);
+          } else {
+            this.openNode(this.currentNode);
+          }
+          this.currentNode = null;
+        } else {
+          this.closeNode(this.openTags[this.currentLevel]);
+        }
+        delete this.openTags[this.currentLevel];
+        this.currentLevel--;
+        return this;
+      };
+      XMLDocumentCB.prototype.end = function () {
+        while (this.currentLevel >= 0) {
+          this.up();
+        }
+        return this.onEnd();
+      };
+      XMLDocumentCB.prototype.openCurrent = function () {
+        if (this.currentNode) {
+          this.currentNode.children = true;
+          return this.openNode(this.currentNode);
+        }
+      };
+      XMLDocumentCB.prototype.openNode = function (node) {
+        var att, chunk, name, ref1;
+        if (!node.isOpen) {
+          if (!this.root && this.currentLevel === 0 && node.type === NodeType.Element) {
+            this.root = node;
+          }
+          chunk = '';
+          if (node.type === NodeType.Element) {
+            this.writerOptions.state = WriterState.OpenTag;
+            chunk = this.writer.indent(node, this.writerOptions, this.currentLevel) + '<' + node.name;
+            ref1 = node.attribs;
+            for (name in ref1) {
+              if (!hasProp.call(ref1, name)) continue;
+              att = ref1[name];
+              chunk += this.writer.attribute(att, this.writerOptions, this.currentLevel);
+            }
+            chunk += (node.children ? '>' : '/>') + this.writer.endline(node, this.writerOptions, this.currentLevel);
+            this.writerOptions.state = WriterState.InsideTag;
+          } else {
+            this.writerOptions.state = WriterState.OpenTag;
+            chunk = this.writer.indent(node, this.writerOptions, this.currentLevel) + '<!DOCTYPE ' + node.rootNodeName;
+            if (node.pubID && node.sysID) {
+              chunk += ' PUBLIC "' + node.pubID + '" "' + node.sysID + '"';
+            } else if (node.sysID) {
+              chunk += ' SYSTEM "' + node.sysID + '"';
+            }
+            if (node.children) {
+              chunk += ' [';
+              this.writerOptions.state = WriterState.InsideTag;
+            } else {
+              this.writerOptions.state = WriterState.CloseTag;
+              chunk += '>';
+            }
+            chunk += this.writer.endline(node, this.writerOptions, this.currentLevel);
+          }
+          this.onData(chunk, this.currentLevel);
+          return node.isOpen = true;
+        }
+      };
+      XMLDocumentCB.prototype.closeNode = function (node) {
+        var chunk;
+        if (!node.isClosed) {
+          chunk = '';
+          this.writerOptions.state = WriterState.CloseTag;
+          if (node.type === NodeType.Element) {
+            chunk = this.writer.indent(node, this.writerOptions, this.currentLevel) + '</' + node.name + '>' + this.writer.endline(node, this.writerOptions, this.currentLevel);
+          } else {
+            chunk = this.writer.indent(node, this.writerOptions, this.currentLevel) + ']>' + this.writer.endline(node, this.writerOptions, this.currentLevel);
+          }
+          this.writerOptions.state = WriterState.None;
+          this.onData(chunk, this.currentLevel);
+          return node.isClosed = true;
+        }
+      };
+      XMLDocumentCB.prototype.onData = function (chunk, level) {
+        this.documentStarted = true;
+        return this.onDataCallback(chunk, level + 1);
+      };
+      XMLDocumentCB.prototype.onEnd = function () {
+        this.documentCompleted = true;
+        return this.onEndCallback();
+      };
+      XMLDocumentCB.prototype.debugInfo = function (name) {
+        if (name == null) {
+          return "";
+        } else {
+          return "node: <" + name + ">";
+        }
+      };
+      XMLDocumentCB.prototype.ele = function () {
+        return this.element.apply(this, arguments);
+      };
+      XMLDocumentCB.prototype.nod = function (name, attributes, text) {
+        return this.node(name, attributes, text);
+      };
+      XMLDocumentCB.prototype.txt = function (value) {
+        return this.text(value);
+      };
+      XMLDocumentCB.prototype.dat = function (value) {
+        return this.cdata(value);
+      };
+      XMLDocumentCB.prototype.com = function (value) {
+        return this.comment(value);
+      };
+      XMLDocumentCB.prototype.ins = function (target, value) {
+        return this.instruction(target, value);
+      };
+      XMLDocumentCB.prototype.dec = function (version, encoding, standalone) {
+        return this.declaration(version, encoding, standalone);
+      };
+      XMLDocumentCB.prototype.dtd = function (root, pubID, sysID) {
+        return this.doctype(root, pubID, sysID);
+      };
+      XMLDocumentCB.prototype.e = function (name, attributes, text) {
+        return this.element(name, attributes, text);
+      };
+      XMLDocumentCB.prototype.n = function (name, attributes, text) {
+        return this.node(name, attributes, text);
+      };
+      XMLDocumentCB.prototype.t = function (value) {
+        return this.text(value);
+      };
+      XMLDocumentCB.prototype.d = function (value) {
+        return this.cdata(value);
+      };
+      XMLDocumentCB.prototype.c = function (value) {
+        return this.comment(value);
+      };
+      XMLDocumentCB.prototype.r = function (value) {
+        return this.raw(value);
+      };
+      XMLDocumentCB.prototype.i = function (target, value) {
+        return this.instruction(target, value);
+      };
+      XMLDocumentCB.prototype.att = function () {
+        if (this.currentNode && this.currentNode.type === NodeType.DocType) {
+          return this.attList.apply(this, arguments);
+        } else {
+          return this.attribute.apply(this, arguments);
+        }
+      };
+      XMLDocumentCB.prototype.a = function () {
+        if (this.currentNode && this.currentNode.type === NodeType.DocType) {
+          return this.attList.apply(this, arguments);
+        } else {
+          return this.attribute.apply(this, arguments);
+        }
+      };
+      XMLDocumentCB.prototype.ent = function (name, value) {
+        return this.entity(name, value);
+      };
+      XMLDocumentCB.prototype.pent = function (name, value) {
+        return this.pEntity(name, value);
+      };
+      XMLDocumentCB.prototype.not = function (name, value) {
+        return this.notation(name, value);
+      };
+      return XMLDocumentCB;
+    }();
+  }).call(commonjsGlobal);
+  return XMLDocumentCB.exports;
+}
+
+var XMLStreamWriter = {exports: {}};
+
+var hasRequiredXMLStreamWriter;
+function requireXMLStreamWriter() {
+  if (hasRequiredXMLStreamWriter) return XMLStreamWriter.exports;
+  hasRequiredXMLStreamWriter = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType,
+      WriterState,
+      XMLWriterBase,
+      extend = function extend(child, parent) {
+        for (var key in parent) {
+          if (hasProp.call(parent, key)) child[key] = parent[key];
+        }
+        function ctor() {
+          this.constructor = child;
+        }
+        ctor.prototype = parent.prototype;
+        child.prototype = new ctor();
+        child.__super__ = parent.prototype;
+        return child;
+      },
+      hasProp = {}.hasOwnProperty;
+    NodeType = requireNodeType();
+    XMLWriterBase = requireXMLWriterBase();
+    WriterState = requireWriterState();
+    XMLStreamWriter.exports = function (superClass) {
+      extend(XMLStreamWriter, superClass);
+      function XMLStreamWriter(stream, options) {
+        this.stream = stream;
+        XMLStreamWriter.__super__.constructor.call(this, options);
+      }
+      XMLStreamWriter.prototype.endline = function (node, options, level) {
+        if (node.isLastRootNode && options.state === WriterState.CloseTag) {
+          return '';
+        } else {
+          return XMLStreamWriter.__super__.endline.call(this, node, options, level);
+        }
+      };
+      XMLStreamWriter.prototype.document = function (doc, options) {
+        var child, i, j, k, len, len1, ref, ref1, results;
+        ref = doc.children;
+        for (i = j = 0, len = ref.length; j < len; i = ++j) {
+          child = ref[i];
+          child.isLastRootNode = i === doc.children.length - 1;
+        }
+        options = this.filterOptions(options);
+        ref1 = doc.children;
+        results = [];
+        for (k = 0, len1 = ref1.length; k < len1; k++) {
+          child = ref1[k];
+          results.push(this.writeChildNode(child, options, 0));
+        }
+        return results;
+      };
+      XMLStreamWriter.prototype.attribute = function (att, options, level) {
+        return this.stream.write(XMLStreamWriter.__super__.attribute.call(this, att, options, level));
+      };
+      XMLStreamWriter.prototype.cdata = function (node, options, level) {
+        return this.stream.write(XMLStreamWriter.__super__.cdata.call(this, node, options, level));
+      };
+      XMLStreamWriter.prototype.comment = function (node, options, level) {
+        return this.stream.write(XMLStreamWriter.__super__.comment.call(this, node, options, level));
+      };
+      XMLStreamWriter.prototype.declaration = function (node, options, level) {
+        return this.stream.write(XMLStreamWriter.__super__.declaration.call(this, node, options, level));
+      };
+      XMLStreamWriter.prototype.docType = function (node, options, level) {
+        var child, j, len, ref;
+        level || (level = 0);
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        this.stream.write(this.indent(node, options, level));
+        this.stream.write('<!DOCTYPE ' + node.root().name);
+        if (node.pubID && node.sysID) {
+          this.stream.write(' PUBLIC "' + node.pubID + '" "' + node.sysID + '"');
+        } else if (node.sysID) {
+          this.stream.write(' SYSTEM "' + node.sysID + '"');
+        }
+        if (node.children.length > 0) {
+          this.stream.write(' [');
+          this.stream.write(this.endline(node, options, level));
+          options.state = WriterState.InsideTag;
+          ref = node.children;
+          for (j = 0, len = ref.length; j < len; j++) {
+            child = ref[j];
+            this.writeChildNode(child, options, level + 1);
+          }
+          options.state = WriterState.CloseTag;
+          this.stream.write(']');
+        }
+        options.state = WriterState.CloseTag;
+        this.stream.write(options.spaceBeforeSlash + '>');
+        this.stream.write(this.endline(node, options, level));
+        options.state = WriterState.None;
+        return this.closeNode(node, options, level);
+      };
+      XMLStreamWriter.prototype.element = function (node, options, level) {
+        var att, child, childNodeCount, firstChildNode, j, len, name, ref, ref1;
+        level || (level = 0);
+        this.openNode(node, options, level);
+        options.state = WriterState.OpenTag;
+        this.stream.write(this.indent(node, options, level) + '<' + node.name);
+        ref = node.attribs;
+        for (name in ref) {
+          if (!hasProp.call(ref, name)) continue;
+          att = ref[name];
+          this.attribute(att, options, level);
+        }
+        childNodeCount = node.children.length;
+        firstChildNode = childNodeCount === 0 ? null : node.children[0];
+        if (childNodeCount === 0 || node.children.every(function (e) {
+          return (e.type === NodeType.Text || e.type === NodeType.Raw) && e.value === '';
+        })) {
+          if (options.allowEmpty) {
+            this.stream.write('>');
+            options.state = WriterState.CloseTag;
+            this.stream.write('</' + node.name + '>');
+          } else {
+            options.state = WriterState.CloseTag;
+            this.stream.write(options.spaceBeforeSlash + '/>');
+          }
+        } else if (options.pretty && childNodeCount === 1 && (firstChildNode.type === NodeType.Text || firstChildNode.type === NodeType.Raw) && firstChildNode.value != null) {
+          this.stream.write('>');
+          options.state = WriterState.InsideTag;
+          options.suppressPrettyCount++;
+          this.writeChildNode(firstChildNode, options, level + 1);
+          options.suppressPrettyCount--;
+          options.state = WriterState.CloseTag;
+          this.stream.write('</' + node.name + '>');
+        } else {
+          this.stream.write('>' + this.endline(node, options, level));
+          options.state = WriterState.InsideTag;
+          ref1 = node.children;
+          for (j = 0, len = ref1.length; j < len; j++) {
+            child = ref1[j];
+            this.writeChildNode(child, options, level + 1);
+          }
+          options.state = WriterState.CloseTag;
+          this.stream.write(this.indent(node, options, level) + '</' + node.name + '>');
+        }
+        this.stream.write(this.endline(node, options, level));
+        options.state = WriterState.None;
+        return this.closeNode(node, options, level);
+      };
+      XMLStreamWriter.prototype.processingInstruction = function (node, options, level) {
+        return this.stream.write(XMLStreamWriter.__super__.processingInstruction.call(this, node, options, level));
+      };
+      XMLStreamWriter.prototype.raw = function (node, options, level) {
+        return this.stream.write(XMLStreamWriter.__super__.raw.call(this, node, options, level));
+      };
+      XMLStreamWriter.prototype.text = function (node, options, level) {
+        return this.stream.write(XMLStreamWriter.__super__.text.call(this, node, options, level));
+      };
+      XMLStreamWriter.prototype.dtdAttList = function (node, options, level) {
+        return this.stream.write(XMLStreamWriter.__super__.dtdAttList.call(this, node, options, level));
+      };
+      XMLStreamWriter.prototype.dtdElement = function (node, options, level) {
+        return this.stream.write(XMLStreamWriter.__super__.dtdElement.call(this, node, options, level));
+      };
+      XMLStreamWriter.prototype.dtdEntity = function (node, options, level) {
+        return this.stream.write(XMLStreamWriter.__super__.dtdEntity.call(this, node, options, level));
+      };
+      XMLStreamWriter.prototype.dtdNotation = function (node, options, level) {
+        return this.stream.write(XMLStreamWriter.__super__.dtdNotation.call(this, node, options, level));
+      };
+      return XMLStreamWriter;
+    }(XMLWriterBase);
+  }).call(commonjsGlobal);
+  return XMLStreamWriter.exports;
+}
+
+var hasRequiredLib$2;
+function requireLib$2() {
+  if (hasRequiredLib$2) return lib$3;
+  hasRequiredLib$2 = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+    var NodeType, WriterState, XMLDOMImplementation, XMLDocument, XMLDocumentCB, XMLStreamWriter, XMLStringWriter, assign, isFunction, ref;
+    ref = requireUtility(), assign = ref.assign, isFunction = ref.isFunction;
+    XMLDOMImplementation = requireXMLDOMImplementation();
+    XMLDocument = requireXMLDocument();
+    XMLDocumentCB = requireXMLDocumentCB();
+    XMLStringWriter = requireXMLStringWriter();
+    XMLStreamWriter = requireXMLStreamWriter();
+    NodeType = requireNodeType();
+    WriterState = requireWriterState();
+    lib$3.create = function (name, xmldec, doctype, options) {
+      var doc, root;
+      if (name == null) {
+        throw new Error("Root element needs a name.");
+      }
+      options = assign({}, xmldec, doctype, options);
+      doc = new XMLDocument(options);
+      root = doc.element(name);
+      if (!options.headless) {
+        doc.declaration(options);
+        if (options.pubID != null || options.sysID != null) {
+          doc.dtd(options);
+        }
+      }
+      return root;
+    };
+    lib$3.begin = function (options, onData, onEnd) {
+      var ref1;
+      if (isFunction(options)) {
+        ref1 = [options, onData], onData = ref1[0], onEnd = ref1[1];
+        options = {};
+      }
+      if (onData) {
+        return new XMLDocumentCB(options, onData, onEnd);
+      } else {
+        return new XMLDocument(options);
+      }
+    };
+    lib$3.stringWriter = function (options) {
+      return new XMLStringWriter(options);
+    };
+    lib$3.streamWriter = function (stream, options) {
+      return new XMLStreamWriter(stream, options);
+    };
+    lib$3.implementation = new XMLDOMImplementation();
+    lib$3.nodeType = NodeType;
+    lib$3.writerState = WriterState;
+  }).call(commonjsGlobal);
+  return lib$3;
+}
+
+var hasRequiredBuilder;
+function requireBuilder() {
+  if (hasRequiredBuilder) return builder;
+  hasRequiredBuilder = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+
+    var builder$1,
+      defaults,
+      escapeCDATA,
+      requiresCDATA,
+      wrapCDATA,
+      hasProp = {}.hasOwnProperty;
+    builder$1 = requireLib$2();
+    defaults = requireDefaults().defaults;
+    requiresCDATA = function requiresCDATA(entry) {
+      return typeof entry === "string" && (entry.indexOf('&') >= 0 || entry.indexOf('>') >= 0 || entry.indexOf('<') >= 0);
+    };
+    wrapCDATA = function wrapCDATA(entry) {
+      return "<![CDATA[" + escapeCDATA(entry) + "]]>";
+    };
+    escapeCDATA = function escapeCDATA(entry) {
+      return entry.replace(']]>', ']]]]><![CDATA[>');
+    };
+    builder.Builder = function () {
+      function Builder(opts) {
+        var key, ref, value;
+        this.options = {};
+        ref = defaults["0.2"];
+        for (key in ref) {
+          if (!hasProp.call(ref, key)) continue;
+          value = ref[key];
+          this.options[key] = value;
+        }
+        for (key in opts) {
+          if (!hasProp.call(opts, key)) continue;
+          value = opts[key];
+          this.options[key] = value;
+        }
+      }
+      Builder.prototype.buildObject = function (rootObj) {
+        var attrkey, charkey, render, rootElement, rootName;
+        attrkey = this.options.attrkey;
+        charkey = this.options.charkey;
+        if (Object.keys(rootObj).length === 1 && this.options.rootName === defaults['0.2'].rootName) {
+          rootName = Object.keys(rootObj)[0];
+          rootObj = rootObj[rootName];
+        } else {
+          rootName = this.options.rootName;
+        }
+        render = function (_this) {
+          return function (element, obj) {
+            var attr, child, entry, index, key, value;
+            if (_typeof(obj) !== 'object') {
+              if (_this.options.cdata && requiresCDATA(obj)) {
+                element.raw(wrapCDATA(obj));
+              } else {
+                element.txt(obj);
+              }
+            } else if (Array.isArray(obj)) {
+              for (index in obj) {
+                if (!hasProp.call(obj, index)) continue;
+                child = obj[index];
+                for (key in child) {
+                  entry = child[key];
+                  element = render(element.ele(key), entry).up();
+                }
+              }
+            } else {
+              for (key in obj) {
+                if (!hasProp.call(obj, key)) continue;
+                child = obj[key];
+                if (key === attrkey) {
+                  if (_typeof(child) === "object") {
+                    for (attr in child) {
+                      value = child[attr];
+                      element = element.att(attr, value);
+                    }
+                  }
+                } else if (key === charkey) {
+                  if (_this.options.cdata && requiresCDATA(child)) {
+                    element = element.raw(wrapCDATA(child));
+                  } else {
+                    element = element.txt(child);
+                  }
+                } else if (Array.isArray(child)) {
+                  for (index in child) {
+                    if (!hasProp.call(child, index)) continue;
+                    entry = child[index];
+                    if (typeof entry === 'string') {
+                      if (_this.options.cdata && requiresCDATA(entry)) {
+                        element = element.ele(key).raw(wrapCDATA(entry)).up();
+                      } else {
+                        element = element.ele(key, entry).up();
+                      }
+                    } else {
+                      element = render(element.ele(key), entry).up();
+                    }
+                  }
+                } else if (_typeof(child) === "object") {
+                  element = render(element.ele(key), child).up();
+                } else {
+                  if (typeof child === 'string' && _this.options.cdata && requiresCDATA(child)) {
+                    element = element.ele(key).raw(wrapCDATA(child)).up();
+                  } else {
+                    if (child == null) {
+                      child = '';
+                    }
+                    element = element.ele(key, child.toString()).up();
+                  }
+                }
+              }
+            }
+            return element;
+          };
+        }(this);
+        rootElement = builder$1.create(rootName, this.options.xmldec, this.options.doctype, {
+          headless: this.options.headless,
+          allowSurrogateChars: this.options.allowSurrogateChars
+        });
+        return render(rootElement, rootObj).end(this.options.renderOpts);
+      };
+      return Builder;
+    }();
+  }).call(commonjsGlobal);
+  return builder;
+}
+
+var parser = {};
+
+var sax = {};
+
+var hasRequiredSax;
+function requireSax() {
+  if (hasRequiredSax) return sax;
+  hasRequiredSax = 1;
+  (function (exports) {
+    (function (sax) {
+      // wrapper for non-node envs
+      sax.parser = function (strict, opt) {
+        return new SAXParser(strict, opt);
+      };
+      sax.SAXParser = SAXParser;
+      sax.SAXStream = SAXStream;
+      sax.createStream = createStream;
+
+      // When we pass the MAX_BUFFER_LENGTH position, start checking for buffer overruns.
+      // When we check, schedule the next check for MAX_BUFFER_LENGTH - (max(buffer lengths)),
+      // since that's the earliest that a buffer overrun could occur.  This way, checks are
+      // as rare as required, but as often as necessary to ensure never crossing this bound.
+      // Furthermore, buffers are only tested at most once per write(), so passing a very
+      // large string into write() might have undesirable effects, but this is manageable by
+      // the caller, so it is assumed to be safe.  Thus, a call to write() may, in the extreme
+      // edge case, result in creating at most one complete copy of the string passed in.
+      // Set to Infinity to have unlimited buffers.
+      sax.MAX_BUFFER_LENGTH = 64 * 1024;
+      var buffers = ['comment', 'sgmlDecl', 'textNode', 'tagName', 'doctype', 'procInstName', 'procInstBody', 'entity', 'attribName', 'attribValue', 'cdata', 'script'];
+      sax.EVENTS = ['text', 'processinginstruction', 'sgmldeclaration', 'doctype', 'comment', 'opentagstart', 'attribute', 'opentag', 'closetag', 'opencdata', 'cdata', 'closecdata', 'error', 'end', 'ready', 'script', 'opennamespace', 'closenamespace'];
+      function SAXParser(strict, opt) {
+        if (!(this instanceof SAXParser)) {
+          return new SAXParser(strict, opt);
+        }
+        var parser = this;
+        clearBuffers(parser);
+        parser.q = parser.c = '';
+        parser.bufferCheckPosition = sax.MAX_BUFFER_LENGTH;
+        parser.opt = opt || {};
+        parser.opt.lowercase = parser.opt.lowercase || parser.opt.lowercasetags;
+        parser.looseCase = parser.opt.lowercase ? 'toLowerCase' : 'toUpperCase';
+        parser.tags = [];
+        parser.closed = parser.closedRoot = parser.sawRoot = false;
+        parser.tag = parser.error = null;
+        parser.strict = !!strict;
+        parser.noscript = !!(strict || parser.opt.noscript);
+        parser.state = S.BEGIN;
+        parser.strictEntities = parser.opt.strictEntities;
+        parser.ENTITIES = parser.strictEntities ? Object.create(sax.XML_ENTITIES) : Object.create(sax.ENTITIES);
+        parser.attribList = [];
+
+        // namespaces form a prototype chain.
+        // it always points at the current tag,
+        // which protos to its parent tag.
+        if (parser.opt.xmlns) {
+          parser.ns = Object.create(rootNS);
+        }
+
+        // disallow unquoted attribute values if not otherwise configured
+        // and strict mode is true
+        if (parser.opt.unquotedAttributeValues === undefined) {
+          parser.opt.unquotedAttributeValues = !strict;
+        }
+
+        // mostly just for error reporting
+        parser.trackPosition = parser.opt.position !== false;
+        if (parser.trackPosition) {
+          parser.position = parser.line = parser.column = 0;
+        }
+        emit(parser, 'onready');
+      }
+      if (!Object.create) {
+        Object.create = function (o) {
+          function F() {}
+          F.prototype = o;
+          var newf = new F();
+          return newf;
+        };
+      }
+      if (!Object.keys) {
+        Object.keys = function (o) {
+          var a = [];
+          for (var i in o) if (o.hasOwnProperty(i)) a.push(i);
+          return a;
+        };
+      }
+      function checkBufferLength(parser) {
+        var maxAllowed = Math.max(sax.MAX_BUFFER_LENGTH, 10);
+        var maxActual = 0;
+        for (var i = 0, l = buffers.length; i < l; i++) {
+          var len = parser[buffers[i]].length;
+          if (len > maxAllowed) {
+            // Text/cdata nodes can get big, and since they're buffered,
+            // we can get here under normal conditions.
+            // Avoid issues by emitting the text node now,
+            // so at least it won't get any bigger.
+            switch (buffers[i]) {
+              case 'textNode':
+                closeText(parser);
+                break;
+              case 'cdata':
+                emitNode(parser, 'oncdata', parser.cdata);
+                parser.cdata = '';
+                break;
+              case 'script':
+                emitNode(parser, 'onscript', parser.script);
+                parser.script = '';
+                break;
+              default:
+                error(parser, 'Max buffer length exceeded: ' + buffers[i]);
+            }
+          }
+          maxActual = Math.max(maxActual, len);
+        }
+        // schedule the next check for the earliest possible buffer overrun.
+        var m = sax.MAX_BUFFER_LENGTH - maxActual;
+        parser.bufferCheckPosition = m + parser.position;
+      }
+      function clearBuffers(parser) {
+        for (var i = 0, l = buffers.length; i < l; i++) {
+          parser[buffers[i]] = '';
+        }
+      }
+      function flushBuffers(parser) {
+        closeText(parser);
+        if (parser.cdata !== '') {
+          emitNode(parser, 'oncdata', parser.cdata);
+          parser.cdata = '';
+        }
+        if (parser.script !== '') {
+          emitNode(parser, 'onscript', parser.script);
+          parser.script = '';
+        }
+      }
+      SAXParser.prototype = {
+        end: function end() {
+          _end(this);
+        },
+        write: write,
+        resume: function resume() {
+          this.error = null;
+          return this;
+        },
+        close: function close() {
+          return this.write(null);
+        },
+        flush: function flush() {
+          flushBuffers(this);
+        }
+      };
+      var Stream;
+      try {
+        Stream = require('stream').Stream;
+      } catch (ex) {
+        Stream = function Stream() {};
+      }
+      if (!Stream) Stream = function Stream() {};
+      var streamWraps = sax.EVENTS.filter(function (ev) {
+        return ev !== 'error' && ev !== 'end';
+      });
+      function createStream(strict, opt) {
+        return new SAXStream(strict, opt);
+      }
+      function SAXStream(strict, opt) {
+        if (!(this instanceof SAXStream)) {
+          return new SAXStream(strict, opt);
+        }
+        Stream.apply(this);
+        this._parser = new SAXParser(strict, opt);
+        this.writable = true;
+        this.readable = true;
+        var me = this;
+        this._parser.onend = function () {
+          me.emit('end');
+        };
+        this._parser.onerror = function (er) {
+          me.emit('error', er);
+
+          // if didn't throw, then means error was handled.
+          // go ahead and clear error, so we can write again.
+          me._parser.error = null;
+        };
+        this._decoder = null;
+        streamWraps.forEach(function (ev) {
+          Object.defineProperty(me, 'on' + ev, {
+            get: function get() {
+              return me._parser['on' + ev];
+            },
+            set: function set(h) {
+              if (!h) {
+                me.removeAllListeners(ev);
+                me._parser['on' + ev] = h;
+                return h;
+              }
+              me.on(ev, h);
+            },
+            enumerable: true,
+            configurable: false
+          });
+        });
+      }
+      SAXStream.prototype = Object.create(Stream.prototype, {
+        constructor: {
+          value: SAXStream
+        }
+      });
+      SAXStream.prototype.write = function (data) {
+        if (typeof Buffer === 'function' && typeof Buffer.isBuffer === 'function' && Buffer.isBuffer(data)) {
+          if (!this._decoder) {
+            var SD = require$$1$4.StringDecoder;
+            this._decoder = new SD('utf8');
+          }
+          data = this._decoder.write(data);
+        }
+        this._parser.write(data.toString());
+        this.emit('data', data);
+        return true;
+      };
+      SAXStream.prototype.end = function (chunk) {
+        if (chunk && chunk.length) {
+          this.write(chunk);
+        }
+        this._parser.end();
+        return true;
+      };
+      SAXStream.prototype.on = function (ev, handler) {
+        var me = this;
+        if (!me._parser['on' + ev] && streamWraps.indexOf(ev) !== -1) {
+          me._parser['on' + ev] = function () {
+            var args = arguments.length === 1 ? [arguments[0]] : Array.apply(null, arguments);
+            args.splice(0, 0, ev);
+            me.emit.apply(me, args);
+          };
+        }
+        return Stream.prototype.on.call(me, ev, handler);
+      };
+
+      // this really needs to be replaced with character classes.
+      // XML allows all manner of ridiculous numbers and digits.
+      var CDATA = '[CDATA[';
+      var DOCTYPE = 'DOCTYPE';
+      var XML_NAMESPACE = 'http://www.w3.org/XML/1998/namespace';
+      var XMLNS_NAMESPACE = 'http://www.w3.org/2000/xmlns/';
+      var rootNS = {
+        xml: XML_NAMESPACE,
+        xmlns: XMLNS_NAMESPACE
+      };
+
+      // http://www.w3.org/TR/REC-xml/#NT-NameStartChar
+      // This implementation works on strings, a single character at a time
+      // as such, it cannot ever support astral-plane characters (10000-EFFFF)
+      // without a significant breaking change to either this  parser, or the
+      // JavaScript language.  Implementation of an emoji-capable xml parser
+      // is left as an exercise for the reader.
+      var nameStart = /[:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]/;
+      var nameBody = /[:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u00B7\u0300-\u036F\u203F-\u2040.\d-]/;
+      var entityStart = /[#:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]/;
+      var entityBody = /[#:_A-Za-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u00B7\u0300-\u036F\u203F-\u2040.\d-]/;
+      function isWhitespace(c) {
+        return c === ' ' || c === '\n' || c === '\r' || c === '\t';
+      }
+      function isQuote(c) {
+        return c === '"' || c === '\'';
+      }
+      function isAttribEnd(c) {
+        return c === '>' || isWhitespace(c);
+      }
+      function isMatch(regex, c) {
+        return regex.test(c);
+      }
+      function notMatch(regex, c) {
+        return !isMatch(regex, c);
+      }
+      var S = 0;
+      sax.STATE = {
+        BEGIN: S++,
+        // leading byte order mark or whitespace
+        BEGIN_WHITESPACE: S++,
+        // leading whitespace
+        TEXT: S++,
+        // general stuff
+        TEXT_ENTITY: S++,
+        // &amp and such.
+        OPEN_WAKA: S++,
+        // <
+        SGML_DECL: S++,
+        // <!BLARG
+        SGML_DECL_QUOTED: S++,
+        // <!BLARG foo "bar
+        DOCTYPE: S++,
+        // <!DOCTYPE
+        DOCTYPE_QUOTED: S++,
+        // <!DOCTYPE "//blah
+        DOCTYPE_DTD: S++,
+        // <!DOCTYPE "//blah" [ ...
+        DOCTYPE_DTD_QUOTED: S++,
+        // <!DOCTYPE "//blah" [ "foo
+        COMMENT_STARTING: S++,
+        // <!-
+        COMMENT: S++,
+        // <!--
+        COMMENT_ENDING: S++,
+        // <!-- blah -
+        COMMENT_ENDED: S++,
+        // <!-- blah --
+        CDATA: S++,
+        // <![CDATA[ something
+        CDATA_ENDING: S++,
+        // ]
+        CDATA_ENDING_2: S++,
+        // ]]
+        PROC_INST: S++,
+        // <?hi
+        PROC_INST_BODY: S++,
+        // <?hi there
+        PROC_INST_ENDING: S++,
+        // <?hi "there" ?
+        OPEN_TAG: S++,
+        // <strong
+        OPEN_TAG_SLASH: S++,
+        // <strong /
+        ATTRIB: S++,
+        // <a
+        ATTRIB_NAME: S++,
+        // <a foo
+        ATTRIB_NAME_SAW_WHITE: S++,
+        // <a foo _
+        ATTRIB_VALUE: S++,
+        // <a foo=
+        ATTRIB_VALUE_QUOTED: S++,
+        // <a foo="bar
+        ATTRIB_VALUE_CLOSED: S++,
+        // <a foo="bar"
+        ATTRIB_VALUE_UNQUOTED: S++,
+        // <a foo=bar
+        ATTRIB_VALUE_ENTITY_Q: S++,
+        // <foo bar="&quot;"
+        ATTRIB_VALUE_ENTITY_U: S++,
+        // <foo bar=&quot
+        CLOSE_TAG: S++,
+        // </a
+        CLOSE_TAG_SAW_WHITE: S++,
+        // </a   >
+        SCRIPT: S++,
+        // <script> ...
+        SCRIPT_ENDING: S++ // <script> ... <
+      };
+      sax.XML_ENTITIES = {
+        'amp': '&',
+        'gt': '>',
+        'lt': '<',
+        'quot': '"',
+        'apos': "'"
+      };
+      sax.ENTITIES = {
+        'amp': '&',
+        'gt': '>',
+        'lt': '<',
+        'quot': '"',
+        'apos': "'",
+        'AElig': 198,
+        'Aacute': 193,
+        'Acirc': 194,
+        'Agrave': 192,
+        'Aring': 197,
+        'Atilde': 195,
+        'Auml': 196,
+        'Ccedil': 199,
+        'ETH': 208,
+        'Eacute': 201,
+        'Ecirc': 202,
+        'Egrave': 200,
+        'Euml': 203,
+        'Iacute': 205,
+        'Icirc': 206,
+        'Igrave': 204,
+        'Iuml': 207,
+        'Ntilde': 209,
+        'Oacute': 211,
+        'Ocirc': 212,
+        'Ograve': 210,
+        'Oslash': 216,
+        'Otilde': 213,
+        'Ouml': 214,
+        'THORN': 222,
+        'Uacute': 218,
+        'Ucirc': 219,
+        'Ugrave': 217,
+        'Uuml': 220,
+        'Yacute': 221,
+        'aacute': 225,
+        'acirc': 226,
+        'aelig': 230,
+        'agrave': 224,
+        'aring': 229,
+        'atilde': 227,
+        'auml': 228,
+        'ccedil': 231,
+        'eacute': 233,
+        'ecirc': 234,
+        'egrave': 232,
+        'eth': 240,
+        'euml': 235,
+        'iacute': 237,
+        'icirc': 238,
+        'igrave': 236,
+        'iuml': 239,
+        'ntilde': 241,
+        'oacute': 243,
+        'ocirc': 244,
+        'ograve': 242,
+        'oslash': 248,
+        'otilde': 245,
+        'ouml': 246,
+        'szlig': 223,
+        'thorn': 254,
+        'uacute': 250,
+        'ucirc': 251,
+        'ugrave': 249,
+        'uuml': 252,
+        'yacute': 253,
+        'yuml': 255,
+        'copy': 169,
+        'reg': 174,
+        'nbsp': 160,
+        'iexcl': 161,
+        'cent': 162,
+        'pound': 163,
+        'curren': 164,
+        'yen': 165,
+        'brvbar': 166,
+        'sect': 167,
+        'uml': 168,
+        'ordf': 170,
+        'laquo': 171,
+        'not': 172,
+        'shy': 173,
+        'macr': 175,
+        'deg': 176,
+        'plusmn': 177,
+        'sup1': 185,
+        'sup2': 178,
+        'sup3': 179,
+        'acute': 180,
+        'micro': 181,
+        'para': 182,
+        'middot': 183,
+        'cedil': 184,
+        'ordm': 186,
+        'raquo': 187,
+        'frac14': 188,
+        'frac12': 189,
+        'frac34': 190,
+        'iquest': 191,
+        'times': 215,
+        'divide': 247,
+        'OElig': 338,
+        'oelig': 339,
+        'Scaron': 352,
+        'scaron': 353,
+        'Yuml': 376,
+        'fnof': 402,
+        'circ': 710,
+        'tilde': 732,
+        'Alpha': 913,
+        'Beta': 914,
+        'Gamma': 915,
+        'Delta': 916,
+        'Epsilon': 917,
+        'Zeta': 918,
+        'Eta': 919,
+        'Theta': 920,
+        'Iota': 921,
+        'Kappa': 922,
+        'Lambda': 923,
+        'Mu': 924,
+        'Nu': 925,
+        'Xi': 926,
+        'Omicron': 927,
+        'Pi': 928,
+        'Rho': 929,
+        'Sigma': 931,
+        'Tau': 932,
+        'Upsilon': 933,
+        'Phi': 934,
+        'Chi': 935,
+        'Psi': 936,
+        'Omega': 937,
+        'alpha': 945,
+        'beta': 946,
+        'gamma': 947,
+        'delta': 948,
+        'epsilon': 949,
+        'zeta': 950,
+        'eta': 951,
+        'theta': 952,
+        'iota': 953,
+        'kappa': 954,
+        'lambda': 955,
+        'mu': 956,
+        'nu': 957,
+        'xi': 958,
+        'omicron': 959,
+        'pi': 960,
+        'rho': 961,
+        'sigmaf': 962,
+        'sigma': 963,
+        'tau': 964,
+        'upsilon': 965,
+        'phi': 966,
+        'chi': 967,
+        'psi': 968,
+        'omega': 969,
+        'thetasym': 977,
+        'upsih': 978,
+        'piv': 982,
+        'ensp': 8194,
+        'emsp': 8195,
+        'thinsp': 8201,
+        'zwnj': 8204,
+        'zwj': 8205,
+        'lrm': 8206,
+        'rlm': 8207,
+        'ndash': 8211,
+        'mdash': 8212,
+        'lsquo': 8216,
+        'rsquo': 8217,
+        'sbquo': 8218,
+        'ldquo': 8220,
+        'rdquo': 8221,
+        'bdquo': 8222,
+        'dagger': 8224,
+        'Dagger': 8225,
+        'bull': 8226,
+        'hellip': 8230,
+        'permil': 8240,
+        'prime': 8242,
+        'Prime': 8243,
+        'lsaquo': 8249,
+        'rsaquo': 8250,
+        'oline': 8254,
+        'frasl': 8260,
+        'euro': 8364,
+        'image': 8465,
+        'weierp': 8472,
+        'real': 8476,
+        'trade': 8482,
+        'alefsym': 8501,
+        'larr': 8592,
+        'uarr': 8593,
+        'rarr': 8594,
+        'darr': 8595,
+        'harr': 8596,
+        'crarr': 8629,
+        'lArr': 8656,
+        'uArr': 8657,
+        'rArr': 8658,
+        'dArr': 8659,
+        'hArr': 8660,
+        'forall': 8704,
+        'part': 8706,
+        'exist': 8707,
+        'empty': 8709,
+        'nabla': 8711,
+        'isin': 8712,
+        'notin': 8713,
+        'ni': 8715,
+        'prod': 8719,
+        'sum': 8721,
+        'minus': 8722,
+        'lowast': 8727,
+        'radic': 8730,
+        'prop': 8733,
+        'infin': 8734,
+        'ang': 8736,
+        'and': 8743,
+        'or': 8744,
+        'cap': 8745,
+        'cup': 8746,
+        'int': 8747,
+        'there4': 8756,
+        'sim': 8764,
+        'cong': 8773,
+        'asymp': 8776,
+        'ne': 8800,
+        'equiv': 8801,
+        'le': 8804,
+        'ge': 8805,
+        'sub': 8834,
+        'sup': 8835,
+        'nsub': 8836,
+        'sube': 8838,
+        'supe': 8839,
+        'oplus': 8853,
+        'otimes': 8855,
+        'perp': 8869,
+        'sdot': 8901,
+        'lceil': 8968,
+        'rceil': 8969,
+        'lfloor': 8970,
+        'rfloor': 8971,
+        'lang': 9001,
+        'rang': 9002,
+        'loz': 9674,
+        'spades': 9824,
+        'clubs': 9827,
+        'hearts': 9829,
+        'diams': 9830
+      };
+      Object.keys(sax.ENTITIES).forEach(function (key) {
+        var e = sax.ENTITIES[key];
+        var s = typeof e === 'number' ? String.fromCharCode(e) : e;
+        sax.ENTITIES[key] = s;
+      });
+      for (var s in sax.STATE) {
+        sax.STATE[sax.STATE[s]] = s;
+      }
+
+      // shorthand
+      S = sax.STATE;
+      function emit(parser, event, data) {
+        parser[event] && parser[event](data);
+      }
+      function emitNode(parser, nodeType, data) {
+        if (parser.textNode) closeText(parser);
+        emit(parser, nodeType, data);
+      }
+      function closeText(parser) {
+        parser.textNode = textopts(parser.opt, parser.textNode);
+        if (parser.textNode) emit(parser, 'ontext', parser.textNode);
+        parser.textNode = '';
+      }
+      function textopts(opt, text) {
+        if (opt.trim) text = text.trim();
+        if (opt.normalize) text = text.replace(/\s+/g, ' ');
+        return text;
+      }
+      function error(parser, er) {
+        closeText(parser);
+        if (parser.trackPosition) {
+          er += '\nLine: ' + parser.line + '\nColumn: ' + parser.column + '\nChar: ' + parser.c;
+        }
+        er = new Error(er);
+        parser.error = er;
+        emit(parser, 'onerror', er);
+        return parser;
+      }
+      function _end(parser) {
+        if (parser.sawRoot && !parser.closedRoot) strictFail(parser, 'Unclosed root tag');
+        if (parser.state !== S.BEGIN && parser.state !== S.BEGIN_WHITESPACE && parser.state !== S.TEXT) {
+          error(parser, 'Unexpected end');
+        }
+        closeText(parser);
+        parser.c = '';
+        parser.closed = true;
+        emit(parser, 'onend');
+        SAXParser.call(parser, parser.strict, parser.opt);
+        return parser;
+      }
+      function strictFail(parser, message) {
+        if (_typeof(parser) !== 'object' || !(parser instanceof SAXParser)) {
+          throw new Error('bad call to strictFail');
+        }
+        if (parser.strict) {
+          error(parser, message);
+        }
+      }
+      function newTag(parser) {
+        if (!parser.strict) parser.tagName = parser.tagName[parser.looseCase]();
+        var parent = parser.tags[parser.tags.length - 1] || parser;
+        var tag = parser.tag = {
+          name: parser.tagName,
+          attributes: {}
+        };
+
+        // will be overridden if tag contails an xmlns="foo" or xmlns:foo="bar"
+        if (parser.opt.xmlns) {
+          tag.ns = parent.ns;
+        }
+        parser.attribList.length = 0;
+        emitNode(parser, 'onopentagstart', tag);
+      }
+      function qname(name, attribute) {
+        var i = name.indexOf(':');
+        var qualName = i < 0 ? ['', name] : name.split(':');
+        var prefix = qualName[0];
+        var local = qualName[1];
+
+        // <x "xmlns"="http://foo">
+        if (attribute && name === 'xmlns') {
+          prefix = 'xmlns';
+          local = '';
+        }
+        return {
+          prefix: prefix,
+          local: local
+        };
+      }
+      function attrib(parser) {
+        if (!parser.strict) {
+          parser.attribName = parser.attribName[parser.looseCase]();
+        }
+        if (parser.attribList.indexOf(parser.attribName) !== -1 || parser.tag.attributes.hasOwnProperty(parser.attribName)) {
+          parser.attribName = parser.attribValue = '';
+          return;
+        }
+        if (parser.opt.xmlns) {
+          var qn = qname(parser.attribName, true);
+          var prefix = qn.prefix;
+          var local = qn.local;
+          if (prefix === 'xmlns') {
+            // namespace binding attribute. push the binding into scope
+            if (local === 'xml' && parser.attribValue !== XML_NAMESPACE) {
+              strictFail(parser, 'xml: prefix must be bound to ' + XML_NAMESPACE + '\n' + 'Actual: ' + parser.attribValue);
+            } else if (local === 'xmlns' && parser.attribValue !== XMLNS_NAMESPACE) {
+              strictFail(parser, 'xmlns: prefix must be bound to ' + XMLNS_NAMESPACE + '\n' + 'Actual: ' + parser.attribValue);
+            } else {
+              var tag = parser.tag;
+              var parent = parser.tags[parser.tags.length - 1] || parser;
+              if (tag.ns === parent.ns) {
+                tag.ns = Object.create(parent.ns);
+              }
+              tag.ns[local] = parser.attribValue;
+            }
+          }
+
+          // defer onattribute events until all attributes have been seen
+          // so any new bindings can take effect. preserve attribute order
+          // so deferred events can be emitted in document order
+          parser.attribList.push([parser.attribName, parser.attribValue]);
+        } else {
+          // in non-xmlns mode, we can emit the event right away
+          parser.tag.attributes[parser.attribName] = parser.attribValue;
+          emitNode(parser, 'onattribute', {
+            name: parser.attribName,
+            value: parser.attribValue
+          });
+        }
+        parser.attribName = parser.attribValue = '';
+      }
+      function openTag(parser, selfClosing) {
+        if (parser.opt.xmlns) {
+          // emit namespace binding events
+          var tag = parser.tag;
+
+          // add namespace info to tag
+          var qn = qname(parser.tagName);
+          tag.prefix = qn.prefix;
+          tag.local = qn.local;
+          tag.uri = tag.ns[qn.prefix] || '';
+          if (tag.prefix && !tag.uri) {
+            strictFail(parser, 'Unbound namespace prefix: ' + JSON.stringify(parser.tagName));
+            tag.uri = qn.prefix;
+          }
+          var parent = parser.tags[parser.tags.length - 1] || parser;
+          if (tag.ns && parent.ns !== tag.ns) {
+            Object.keys(tag.ns).forEach(function (p) {
+              emitNode(parser, 'onopennamespace', {
+                prefix: p,
+                uri: tag.ns[p]
+              });
+            });
+          }
+
+          // handle deferred onattribute events
+          // Note: do not apply default ns to attributes:
+          //   http://www.w3.org/TR/REC-xml-names/#defaulting
+          for (var i = 0, l = parser.attribList.length; i < l; i++) {
+            var nv = parser.attribList[i];
+            var name = nv[0];
+            var value = nv[1];
+            var qualName = qname(name, true);
+            var prefix = qualName.prefix;
+            var local = qualName.local;
+            var uri = prefix === '' ? '' : tag.ns[prefix] || '';
+            var a = {
+              name: name,
+              value: value,
+              prefix: prefix,
+              local: local,
+              uri: uri
+            };
+
+            // if there's any attributes with an undefined namespace,
+            // then fail on them now.
+            if (prefix && prefix !== 'xmlns' && !uri) {
+              strictFail(parser, 'Unbound namespace prefix: ' + JSON.stringify(prefix));
+              a.uri = prefix;
+            }
+            parser.tag.attributes[name] = a;
+            emitNode(parser, 'onattribute', a);
+          }
+          parser.attribList.length = 0;
+        }
+        parser.tag.isSelfClosing = !!selfClosing;
+
+        // process the tag
+        parser.sawRoot = true;
+        parser.tags.push(parser.tag);
+        emitNode(parser, 'onopentag', parser.tag);
+        if (!selfClosing) {
+          // special case for <script> in non-strict mode.
+          if (!parser.noscript && parser.tagName.toLowerCase() === 'script') {
+            parser.state = S.SCRIPT;
+          } else {
+            parser.state = S.TEXT;
+          }
+          parser.tag = null;
+          parser.tagName = '';
+        }
+        parser.attribName = parser.attribValue = '';
+        parser.attribList.length = 0;
+      }
+      function closeTag(parser) {
+        if (!parser.tagName) {
+          strictFail(parser, 'Weird empty close tag.');
+          parser.textNode += '</>';
+          parser.state = S.TEXT;
+          return;
+        }
+        if (parser.script) {
+          if (parser.tagName !== 'script') {
+            parser.script += '</' + parser.tagName + '>';
+            parser.tagName = '';
+            parser.state = S.SCRIPT;
+            return;
+          }
+          emitNode(parser, 'onscript', parser.script);
+          parser.script = '';
+        }
+
+        // first make sure that the closing tag actually exists.
+        // <a><b></c></b></a> will close everything, otherwise.
+        var t = parser.tags.length;
+        var tagName = parser.tagName;
+        if (!parser.strict) {
+          tagName = tagName[parser.looseCase]();
+        }
+        var closeTo = tagName;
+        while (t--) {
+          var close = parser.tags[t];
+          if (close.name !== closeTo) {
+            // fail the first time in strict mode
+            strictFail(parser, 'Unexpected close tag');
+          } else {
+            break;
+          }
+        }
+
+        // didn't find it.  we already failed for strict, so just abort.
+        if (t < 0) {
+          strictFail(parser, 'Unmatched closing tag: ' + parser.tagName);
+          parser.textNode += '</' + parser.tagName + '>';
+          parser.state = S.TEXT;
+          return;
+        }
+        parser.tagName = tagName;
+        var s = parser.tags.length;
+        while (s-- > t) {
+          var tag = parser.tag = parser.tags.pop();
+          parser.tagName = parser.tag.name;
+          emitNode(parser, 'onclosetag', parser.tagName);
+          var x = {};
+          for (var i in tag.ns) {
+            x[i] = tag.ns[i];
+          }
+          var parent = parser.tags[parser.tags.length - 1] || parser;
+          if (parser.opt.xmlns && tag.ns !== parent.ns) {
+            // remove namespace bindings introduced by tag
+            Object.keys(tag.ns).forEach(function (p) {
+              var n = tag.ns[p];
+              emitNode(parser, 'onclosenamespace', {
+                prefix: p,
+                uri: n
+              });
+            });
+          }
+        }
+        if (t === 0) parser.closedRoot = true;
+        parser.tagName = parser.attribValue = parser.attribName = '';
+        parser.attribList.length = 0;
+        parser.state = S.TEXT;
+      }
+      function parseEntity(parser) {
+        var entity = parser.entity;
+        var entityLC = entity.toLowerCase();
+        var num;
+        var numStr = '';
+        if (parser.ENTITIES[entity]) {
+          return parser.ENTITIES[entity];
+        }
+        if (parser.ENTITIES[entityLC]) {
+          return parser.ENTITIES[entityLC];
+        }
+        entity = entityLC;
+        if (entity.charAt(0) === '#') {
+          if (entity.charAt(1) === 'x') {
+            entity = entity.slice(2);
+            num = parseInt(entity, 16);
+            numStr = num.toString(16);
+          } else {
+            entity = entity.slice(1);
+            num = parseInt(entity, 10);
+            numStr = num.toString(10);
+          }
+        }
+        entity = entity.replace(/^0+/, '');
+        if (isNaN(num) || numStr.toLowerCase() !== entity) {
+          strictFail(parser, 'Invalid character entity');
+          return '&' + parser.entity + ';';
+        }
+        return String.fromCodePoint(num);
+      }
+      function beginWhiteSpace(parser, c) {
+        if (c === '<') {
+          parser.state = S.OPEN_WAKA;
+          parser.startTagPosition = parser.position;
+        } else if (!isWhitespace(c)) {
+          // have to process this as a text node.
+          // weird, but happens.
+          strictFail(parser, 'Non-whitespace before first tag.');
+          parser.textNode = c;
+          parser.state = S.TEXT;
+        }
+      }
+      function charAt(chunk, i) {
+        var result = '';
+        if (i < chunk.length) {
+          result = chunk.charAt(i);
+        }
+        return result;
+      }
+      function write(chunk) {
+        var parser = this;
+        if (this.error) {
+          throw this.error;
+        }
+        if (parser.closed) {
+          return error(parser, 'Cannot write after close. Assign an onready handler.');
+        }
+        if (chunk === null) {
+          return _end(parser);
+        }
+        if (_typeof(chunk) === 'object') {
+          chunk = chunk.toString();
+        }
+        var i = 0;
+        var c = '';
+        while (true) {
+          c = charAt(chunk, i++);
+          parser.c = c;
+          if (!c) {
+            break;
+          }
+          if (parser.trackPosition) {
+            parser.position++;
+            if (c === '\n') {
+              parser.line++;
+              parser.column = 0;
+            } else {
+              parser.column++;
+            }
+          }
+          switch (parser.state) {
+            case S.BEGIN:
+              parser.state = S.BEGIN_WHITESPACE;
+              if (c === "\uFEFF") {
+                continue;
+              }
+              beginWhiteSpace(parser, c);
+              continue;
+            case S.BEGIN_WHITESPACE:
+              beginWhiteSpace(parser, c);
+              continue;
+            case S.TEXT:
+              if (parser.sawRoot && !parser.closedRoot) {
+                var starti = i - 1;
+                while (c && c !== '<' && c !== '&') {
+                  c = charAt(chunk, i++);
+                  if (c && parser.trackPosition) {
+                    parser.position++;
+                    if (c === '\n') {
+                      parser.line++;
+                      parser.column = 0;
+                    } else {
+                      parser.column++;
+                    }
+                  }
+                }
+                parser.textNode += chunk.substring(starti, i - 1);
+              }
+              if (c === '<' && !(parser.sawRoot && parser.closedRoot && !parser.strict)) {
+                parser.state = S.OPEN_WAKA;
+                parser.startTagPosition = parser.position;
+              } else {
+                if (!isWhitespace(c) && (!parser.sawRoot || parser.closedRoot)) {
+                  strictFail(parser, 'Text data outside of root node.');
+                }
+                if (c === '&') {
+                  parser.state = S.TEXT_ENTITY;
+                } else {
+                  parser.textNode += c;
+                }
+              }
+              continue;
+            case S.SCRIPT:
+              // only non-strict
+              if (c === '<') {
+                parser.state = S.SCRIPT_ENDING;
+              } else {
+                parser.script += c;
+              }
+              continue;
+            case S.SCRIPT_ENDING:
+              if (c === '/') {
+                parser.state = S.CLOSE_TAG;
+              } else {
+                parser.script += '<' + c;
+                parser.state = S.SCRIPT;
+              }
+              continue;
+            case S.OPEN_WAKA:
+              // either a /, ?, !, or text is coming next.
+              if (c === '!') {
+                parser.state = S.SGML_DECL;
+                parser.sgmlDecl = '';
+              } else if (isWhitespace(c)) ; else if (isMatch(nameStart, c)) {
+                parser.state = S.OPEN_TAG;
+                parser.tagName = c;
+              } else if (c === '/') {
+                parser.state = S.CLOSE_TAG;
+                parser.tagName = '';
+              } else if (c === '?') {
+                parser.state = S.PROC_INST;
+                parser.procInstName = parser.procInstBody = '';
+              } else {
+                strictFail(parser, 'Unencoded <');
+                // if there was some whitespace, then add that in.
+                if (parser.startTagPosition + 1 < parser.position) {
+                  var pad = parser.position - parser.startTagPosition;
+                  c = new Array(pad).join(' ') + c;
+                }
+                parser.textNode += '<' + c;
+                parser.state = S.TEXT;
+              }
+              continue;
+            case S.SGML_DECL:
+              if (parser.sgmlDecl + c === '--') {
+                parser.state = S.COMMENT;
+                parser.comment = '';
+                parser.sgmlDecl = '';
+                continue;
+              }
+              if (parser.doctype && parser.doctype !== true && parser.sgmlDecl) {
+                parser.state = S.DOCTYPE_DTD;
+                parser.doctype += '<!' + parser.sgmlDecl + c;
+                parser.sgmlDecl = '';
+              } else if ((parser.sgmlDecl + c).toUpperCase() === CDATA) {
+                emitNode(parser, 'onopencdata');
+                parser.state = S.CDATA;
+                parser.sgmlDecl = '';
+                parser.cdata = '';
+              } else if ((parser.sgmlDecl + c).toUpperCase() === DOCTYPE) {
+                parser.state = S.DOCTYPE;
+                if (parser.doctype || parser.sawRoot) {
+                  strictFail(parser, 'Inappropriately located doctype declaration');
+                }
+                parser.doctype = '';
+                parser.sgmlDecl = '';
+              } else if (c === '>') {
+                emitNode(parser, 'onsgmldeclaration', parser.sgmlDecl);
+                parser.sgmlDecl = '';
+                parser.state = S.TEXT;
+              } else if (isQuote(c)) {
+                parser.state = S.SGML_DECL_QUOTED;
+                parser.sgmlDecl += c;
+              } else {
+                parser.sgmlDecl += c;
+              }
+              continue;
+            case S.SGML_DECL_QUOTED:
+              if (c === parser.q) {
+                parser.state = S.SGML_DECL;
+                parser.q = '';
+              }
+              parser.sgmlDecl += c;
+              continue;
+            case S.DOCTYPE:
+              if (c === '>') {
+                parser.state = S.TEXT;
+                emitNode(parser, 'ondoctype', parser.doctype);
+                parser.doctype = true; // just remember that we saw it.
+              } else {
+                parser.doctype += c;
+                if (c === '[') {
+                  parser.state = S.DOCTYPE_DTD;
+                } else if (isQuote(c)) {
+                  parser.state = S.DOCTYPE_QUOTED;
+                  parser.q = c;
+                }
+              }
+              continue;
+            case S.DOCTYPE_QUOTED:
+              parser.doctype += c;
+              if (c === parser.q) {
+                parser.q = '';
+                parser.state = S.DOCTYPE;
+              }
+              continue;
+            case S.DOCTYPE_DTD:
+              if (c === ']') {
+                parser.doctype += c;
+                parser.state = S.DOCTYPE;
+              } else if (c === '<') {
+                parser.state = S.OPEN_WAKA;
+                parser.startTagPosition = parser.position;
+              } else if (isQuote(c)) {
+                parser.doctype += c;
+                parser.state = S.DOCTYPE_DTD_QUOTED;
+                parser.q = c;
+              } else {
+                parser.doctype += c;
+              }
+              continue;
+            case S.DOCTYPE_DTD_QUOTED:
+              parser.doctype += c;
+              if (c === parser.q) {
+                parser.state = S.DOCTYPE_DTD;
+                parser.q = '';
+              }
+              continue;
+            case S.COMMENT:
+              if (c === '-') {
+                parser.state = S.COMMENT_ENDING;
+              } else {
+                parser.comment += c;
+              }
+              continue;
+            case S.COMMENT_ENDING:
+              if (c === '-') {
+                parser.state = S.COMMENT_ENDED;
+                parser.comment = textopts(parser.opt, parser.comment);
+                if (parser.comment) {
+                  emitNode(parser, 'oncomment', parser.comment);
+                }
+                parser.comment = '';
+              } else {
+                parser.comment += '-' + c;
+                parser.state = S.COMMENT;
+              }
+              continue;
+            case S.COMMENT_ENDED:
+              if (c !== '>') {
+                strictFail(parser, 'Malformed comment');
+                // allow <!-- blah -- bloo --> in non-strict mode,
+                // which is a comment of " blah -- bloo "
+                parser.comment += '--' + c;
+                parser.state = S.COMMENT;
+              } else if (parser.doctype && parser.doctype !== true) {
+                parser.state = S.DOCTYPE_DTD;
+              } else {
+                parser.state = S.TEXT;
+              }
+              continue;
+            case S.CDATA:
+              if (c === ']') {
+                parser.state = S.CDATA_ENDING;
+              } else {
+                parser.cdata += c;
+              }
+              continue;
+            case S.CDATA_ENDING:
+              if (c === ']') {
+                parser.state = S.CDATA_ENDING_2;
+              } else {
+                parser.cdata += ']' + c;
+                parser.state = S.CDATA;
+              }
+              continue;
+            case S.CDATA_ENDING_2:
+              if (c === '>') {
+                if (parser.cdata) {
+                  emitNode(parser, 'oncdata', parser.cdata);
+                }
+                emitNode(parser, 'onclosecdata');
+                parser.cdata = '';
+                parser.state = S.TEXT;
+              } else if (c === ']') {
+                parser.cdata += ']';
+              } else {
+                parser.cdata += ']]' + c;
+                parser.state = S.CDATA;
+              }
+              continue;
+            case S.PROC_INST:
+              if (c === '?') {
+                parser.state = S.PROC_INST_ENDING;
+              } else if (isWhitespace(c)) {
+                parser.state = S.PROC_INST_BODY;
+              } else {
+                parser.procInstName += c;
+              }
+              continue;
+            case S.PROC_INST_BODY:
+              if (!parser.procInstBody && isWhitespace(c)) {
+                continue;
+              } else if (c === '?') {
+                parser.state = S.PROC_INST_ENDING;
+              } else {
+                parser.procInstBody += c;
+              }
+              continue;
+            case S.PROC_INST_ENDING:
+              if (c === '>') {
+                emitNode(parser, 'onprocessinginstruction', {
+                  name: parser.procInstName,
+                  body: parser.procInstBody
+                });
+                parser.procInstName = parser.procInstBody = '';
+                parser.state = S.TEXT;
+              } else {
+                parser.procInstBody += '?' + c;
+                parser.state = S.PROC_INST_BODY;
+              }
+              continue;
+            case S.OPEN_TAG:
+              if (isMatch(nameBody, c)) {
+                parser.tagName += c;
+              } else {
+                newTag(parser);
+                if (c === '>') {
+                  openTag(parser);
+                } else if (c === '/') {
+                  parser.state = S.OPEN_TAG_SLASH;
+                } else {
+                  if (!isWhitespace(c)) {
+                    strictFail(parser, 'Invalid character in tag name');
+                  }
+                  parser.state = S.ATTRIB;
+                }
+              }
+              continue;
+            case S.OPEN_TAG_SLASH:
+              if (c === '>') {
+                openTag(parser, true);
+                closeTag(parser);
+              } else {
+                strictFail(parser, 'Forward-slash in opening tag not followed by >');
+                parser.state = S.ATTRIB;
+              }
+              continue;
+            case S.ATTRIB:
+              // haven't read the attribute name yet.
+              if (isWhitespace(c)) {
+                continue;
+              } else if (c === '>') {
+                openTag(parser);
+              } else if (c === '/') {
+                parser.state = S.OPEN_TAG_SLASH;
+              } else if (isMatch(nameStart, c)) {
+                parser.attribName = c;
+                parser.attribValue = '';
+                parser.state = S.ATTRIB_NAME;
+              } else {
+                strictFail(parser, 'Invalid attribute name');
+              }
+              continue;
+            case S.ATTRIB_NAME:
+              if (c === '=') {
+                parser.state = S.ATTRIB_VALUE;
+              } else if (c === '>') {
+                strictFail(parser, 'Attribute without value');
+                parser.attribValue = parser.attribName;
+                attrib(parser);
+                openTag(parser);
+              } else if (isWhitespace(c)) {
+                parser.state = S.ATTRIB_NAME_SAW_WHITE;
+              } else if (isMatch(nameBody, c)) {
+                parser.attribName += c;
+              } else {
+                strictFail(parser, 'Invalid attribute name');
+              }
+              continue;
+            case S.ATTRIB_NAME_SAW_WHITE:
+              if (c === '=') {
+                parser.state = S.ATTRIB_VALUE;
+              } else if (isWhitespace(c)) {
+                continue;
+              } else {
+                strictFail(parser, 'Attribute without value');
+                parser.tag.attributes[parser.attribName] = '';
+                parser.attribValue = '';
+                emitNode(parser, 'onattribute', {
+                  name: parser.attribName,
+                  value: ''
+                });
+                parser.attribName = '';
+                if (c === '>') {
+                  openTag(parser);
+                } else if (isMatch(nameStart, c)) {
+                  parser.attribName = c;
+                  parser.state = S.ATTRIB_NAME;
+                } else {
+                  strictFail(parser, 'Invalid attribute name');
+                  parser.state = S.ATTRIB;
+                }
+              }
+              continue;
+            case S.ATTRIB_VALUE:
+              if (isWhitespace(c)) {
+                continue;
+              } else if (isQuote(c)) {
+                parser.q = c;
+                parser.state = S.ATTRIB_VALUE_QUOTED;
+              } else {
+                if (!parser.opt.unquotedAttributeValues) {
+                  error(parser, 'Unquoted attribute value');
+                }
+                parser.state = S.ATTRIB_VALUE_UNQUOTED;
+                parser.attribValue = c;
+              }
+              continue;
+            case S.ATTRIB_VALUE_QUOTED:
+              if (c !== parser.q) {
+                if (c === '&') {
+                  parser.state = S.ATTRIB_VALUE_ENTITY_Q;
+                } else {
+                  parser.attribValue += c;
+                }
+                continue;
+              }
+              attrib(parser);
+              parser.q = '';
+              parser.state = S.ATTRIB_VALUE_CLOSED;
+              continue;
+            case S.ATTRIB_VALUE_CLOSED:
+              if (isWhitespace(c)) {
+                parser.state = S.ATTRIB;
+              } else if (c === '>') {
+                openTag(parser);
+              } else if (c === '/') {
+                parser.state = S.OPEN_TAG_SLASH;
+              } else if (isMatch(nameStart, c)) {
+                strictFail(parser, 'No whitespace between attributes');
+                parser.attribName = c;
+                parser.attribValue = '';
+                parser.state = S.ATTRIB_NAME;
+              } else {
+                strictFail(parser, 'Invalid attribute name');
+              }
+              continue;
+            case S.ATTRIB_VALUE_UNQUOTED:
+              if (!isAttribEnd(c)) {
+                if (c === '&') {
+                  parser.state = S.ATTRIB_VALUE_ENTITY_U;
+                } else {
+                  parser.attribValue += c;
+                }
+                continue;
+              }
+              attrib(parser);
+              if (c === '>') {
+                openTag(parser);
+              } else {
+                parser.state = S.ATTRIB;
+              }
+              continue;
+            case S.CLOSE_TAG:
+              if (!parser.tagName) {
+                if (isWhitespace(c)) {
+                  continue;
+                } else if (notMatch(nameStart, c)) {
+                  if (parser.script) {
+                    parser.script += '</' + c;
+                    parser.state = S.SCRIPT;
+                  } else {
+                    strictFail(parser, 'Invalid tagname in closing tag.');
+                  }
+                } else {
+                  parser.tagName = c;
+                }
+              } else if (c === '>') {
+                closeTag(parser);
+              } else if (isMatch(nameBody, c)) {
+                parser.tagName += c;
+              } else if (parser.script) {
+                parser.script += '</' + parser.tagName;
+                parser.tagName = '';
+                parser.state = S.SCRIPT;
+              } else {
+                if (!isWhitespace(c)) {
+                  strictFail(parser, 'Invalid tagname in closing tag');
+                }
+                parser.state = S.CLOSE_TAG_SAW_WHITE;
+              }
+              continue;
+            case S.CLOSE_TAG_SAW_WHITE:
+              if (isWhitespace(c)) {
+                continue;
+              }
+              if (c === '>') {
+                closeTag(parser);
+              } else {
+                strictFail(parser, 'Invalid characters in closing tag');
+              }
+              continue;
+            case S.TEXT_ENTITY:
+            case S.ATTRIB_VALUE_ENTITY_Q:
+            case S.ATTRIB_VALUE_ENTITY_U:
+              var returnState;
+              var buffer;
+              switch (parser.state) {
+                case S.TEXT_ENTITY:
+                  returnState = S.TEXT;
+                  buffer = 'textNode';
+                  break;
+                case S.ATTRIB_VALUE_ENTITY_Q:
+                  returnState = S.ATTRIB_VALUE_QUOTED;
+                  buffer = 'attribValue';
+                  break;
+                case S.ATTRIB_VALUE_ENTITY_U:
+                  returnState = S.ATTRIB_VALUE_UNQUOTED;
+                  buffer = 'attribValue';
+                  break;
+              }
+              if (c === ';') {
+                var parsedEntity = parseEntity(parser);
+                if (parser.opt.unparsedEntities && !Object.values(sax.XML_ENTITIES).includes(parsedEntity)) {
+                  parser.entity = '';
+                  parser.state = returnState;
+                  parser.write(parsedEntity);
+                } else {
+                  parser[buffer] += parsedEntity;
+                  parser.entity = '';
+                  parser.state = returnState;
+                }
+              } else if (isMatch(parser.entity.length ? entityBody : entityStart, c)) {
+                parser.entity += c;
+              } else {
+                strictFail(parser, 'Invalid character in entity name');
+                parser[buffer] += '&' + parser.entity + c;
+                parser.entity = '';
+                parser.state = returnState;
+              }
+              continue;
+            default:
+              /* istanbul ignore next */{
+                throw new Error(parser, 'Unknown state: ' + parser.state);
+              }
+          }
+        } // while
+
+        if (parser.position >= parser.bufferCheckPosition) {
+          checkBufferLength(parser);
+        }
+        return parser;
+      }
+
+      /*! http://mths.be/fromcodepoint v0.1.0 by @mathias */
+      /* istanbul ignore next */
+      if (!String.fromCodePoint) {
+        (function () {
+          var stringFromCharCode = String.fromCharCode;
+          var floor = Math.floor;
+          var fromCodePoint = function fromCodePoint() {
+            var MAX_SIZE = 0x4000;
+            var codeUnits = [];
+            var highSurrogate;
+            var lowSurrogate;
+            var index = -1;
+            var length = arguments.length;
+            if (!length) {
+              return '';
+            }
+            var result = '';
+            while (++index < length) {
+              var codePoint = Number(arguments[index]);
+              if (!isFinite(codePoint) ||
+              // `NaN`, `+Infinity`, or `-Infinity`
+              codePoint < 0 ||
+              // not a valid Unicode code point
+              codePoint > 0x10FFFF ||
+              // not a valid Unicode code point
+              floor(codePoint) !== codePoint // not an integer
+              ) {
+                throw RangeError('Invalid code point: ' + codePoint);
+              }
+              if (codePoint <= 0xFFFF) {
+                // BMP code point
+                codeUnits.push(codePoint);
+              } else {
+                // Astral code point; split in surrogate halves
+                // http://mathiasbynens.be/notes/javascript-encoding#surrogate-formulae
+                codePoint -= 0x10000;
+                highSurrogate = (codePoint >> 10) + 0xD800;
+                lowSurrogate = codePoint % 0x400 + 0xDC00;
+                codeUnits.push(highSurrogate, lowSurrogate);
+              }
+              if (index + 1 === length || codeUnits.length > MAX_SIZE) {
+                result += stringFromCharCode.apply(null, codeUnits);
+                codeUnits.length = 0;
+              }
+            }
+            return result;
+          };
+          /* istanbul ignore next */
+          if (Object.defineProperty) {
+            Object.defineProperty(String, 'fromCodePoint', {
+              value: fromCodePoint,
+              configurable: true,
+              writable: true
+            });
+          } else {
+            String.fromCodePoint = fromCodePoint;
+          }
+        })();
+      }
+    })(exports);
+  })(sax);
+  return sax;
+}
+
+var bom = {};
+
+var hasRequiredBom;
+function requireBom() {
+  if (hasRequiredBom) return bom;
+  hasRequiredBom = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+
+    bom.stripBOM = function (str) {
+      if (str[0] === "\uFEFF") {
+        return str.substring(1);
+      } else {
+        return str;
+      }
+    };
+  }).call(commonjsGlobal);
+  return bom;
+}
+
+var processors = {};
+
+var hasRequiredProcessors;
+function requireProcessors() {
+  if (hasRequiredProcessors) return processors;
+  hasRequiredProcessors = 1;
+  // Generated by CoffeeScript 1.12.7
+  (function () {
+
+    var prefixMatch;
+    prefixMatch = new RegExp(/(?!xmlns)^.*:/);
+    processors.normalize = function (str) {
+      return str.toLowerCase();
+    };
+    processors.firstCharLowerCase = function (str) {
+      return str.charAt(0).toLowerCase() + str.slice(1);
+    };
+    processors.stripPrefix = function (str) {
+      return str.replace(prefixMatch, '');
+    };
+    processors.parseNumbers = function (str) {
+      if (!isNaN(str)) {
+        str = str % 1 === 0 ? parseInt(str, 10) : parseFloat(str);
+      }
+      return str;
+    };
+    processors.parseBooleans = function (str) {
+      if (/^(?:true|false)$/i.test(str)) {
+        str = str.toLowerCase() === 'true';
+      }
+      return str;
+    };
+  }).call(commonjsGlobal);
+  return processors;
+}
+
+var hasRequiredParser;
+function requireParser() {
+  if (hasRequiredParser) return parser;
+  hasRequiredParser = 1;
+  (function (exports) {
+    // Generated by CoffeeScript 1.12.7
+    (function () {
+
+      var bom,
+        defaults,
+        defineProperty,
+        events,
+        isEmpty,
+        processItem,
+        processors,
+        sax,
+        setImmediate,
+        bind = function bind(fn, me) {
+          return function () {
+            return fn.apply(me, arguments);
+          };
+        },
+        extend = function extend(child, parent) {
+          for (var key in parent) {
+            if (hasProp.call(parent, key)) child[key] = parent[key];
+          }
+          function ctor() {
+            this.constructor = child;
+          }
+          ctor.prototype = parent.prototype;
+          child.prototype = new ctor();
+          child.__super__ = parent.prototype;
+          return child;
+        },
+        hasProp = {}.hasOwnProperty;
+      sax = requireSax();
+      events = require$$1$1;
+      bom = requireBom();
+      processors = requireProcessors();
+      setImmediate = require$$4$1.setImmediate;
+      defaults = requireDefaults().defaults;
+      isEmpty = function isEmpty(thing) {
+        return _typeof(thing) === "object" && thing != null && Object.keys(thing).length === 0;
+      };
+      processItem = function processItem(processors, item, key) {
+        var i, len, process;
+        for (i = 0, len = processors.length; i < len; i++) {
+          process = processors[i];
+          item = process(item, key);
+        }
+        return item;
+      };
+      defineProperty = function defineProperty(obj, key, value) {
+        var descriptor;
+        descriptor = Object.create(null);
+        descriptor.value = value;
+        descriptor.writable = true;
+        descriptor.enumerable = true;
+        descriptor.configurable = true;
+        return Object.defineProperty(obj, key, descriptor);
+      };
+      exports.Parser = function (superClass) {
+        extend(Parser, superClass);
+        function Parser(opts) {
+          this.parseStringPromise = bind(this.parseStringPromise, this);
+          this.parseString = bind(this.parseString, this);
+          this.reset = bind(this.reset, this);
+          this.assignOrPush = bind(this.assignOrPush, this);
+          this.processAsync = bind(this.processAsync, this);
+          var key, ref, value;
+          if (!(this instanceof exports.Parser)) {
+            return new exports.Parser(opts);
+          }
+          this.options = {};
+          ref = defaults["0.2"];
+          for (key in ref) {
+            if (!hasProp.call(ref, key)) continue;
+            value = ref[key];
+            this.options[key] = value;
+          }
+          for (key in opts) {
+            if (!hasProp.call(opts, key)) continue;
+            value = opts[key];
+            this.options[key] = value;
+          }
+          if (this.options.xmlns) {
+            this.options.xmlnskey = this.options.attrkey + "ns";
+          }
+          if (this.options.normalizeTags) {
+            if (!this.options.tagNameProcessors) {
+              this.options.tagNameProcessors = [];
+            }
+            this.options.tagNameProcessors.unshift(processors.normalize);
+          }
+          this.reset();
+        }
+        Parser.prototype.processAsync = function () {
+          var chunk, err;
+          try {
+            if (this.remaining.length <= this.options.chunkSize) {
+              chunk = this.remaining;
+              this.remaining = '';
+              this.saxParser = this.saxParser.write(chunk);
+              return this.saxParser.close();
+            } else {
+              chunk = this.remaining.substr(0, this.options.chunkSize);
+              this.remaining = this.remaining.substr(this.options.chunkSize, this.remaining.length);
+              this.saxParser = this.saxParser.write(chunk);
+              return setImmediate(this.processAsync);
+            }
+          } catch (error1) {
+            err = error1;
+            if (!this.saxParser.errThrown) {
+              this.saxParser.errThrown = true;
+              return this.emit(err);
+            }
+          }
+        };
+        Parser.prototype.assignOrPush = function (obj, key, newValue) {
+          if (!(key in obj)) {
+            if (!this.options.explicitArray) {
+              return defineProperty(obj, key, newValue);
+            } else {
+              return defineProperty(obj, key, [newValue]);
+            }
+          } else {
+            if (!(obj[key] instanceof Array)) {
+              defineProperty(obj, key, [obj[key]]);
+            }
+            return obj[key].push(newValue);
+          }
+        };
+        Parser.prototype.reset = function () {
+          var attrkey, charkey, ontext, stack;
+          this.removeAllListeners();
+          this.saxParser = sax.parser(this.options.strict, {
+            trim: false,
+            normalize: false,
+            xmlns: this.options.xmlns
+          });
+          this.saxParser.errThrown = false;
+          this.saxParser.onerror = function (_this) {
+            return function (error) {
+              _this.saxParser.resume();
+              if (!_this.saxParser.errThrown) {
+                _this.saxParser.errThrown = true;
+                return _this.emit("error", error);
+              }
+            };
+          }(this);
+          this.saxParser.onend = function (_this) {
+            return function () {
+              if (!_this.saxParser.ended) {
+                _this.saxParser.ended = true;
+                return _this.emit("end", _this.resultObject);
+              }
+            };
+          }(this);
+          this.saxParser.ended = false;
+          this.EXPLICIT_CHARKEY = this.options.explicitCharkey;
+          this.resultObject = null;
+          stack = [];
+          attrkey = this.options.attrkey;
+          charkey = this.options.charkey;
+          this.saxParser.onopentag = function (_this) {
+            return function (node) {
+              var key, newValue, obj, processedKey, ref;
+              obj = {};
+              obj[charkey] = "";
+              if (!_this.options.ignoreAttrs) {
+                ref = node.attributes;
+                for (key in ref) {
+                  if (!hasProp.call(ref, key)) continue;
+                  if (!(attrkey in obj) && !_this.options.mergeAttrs) {
+                    obj[attrkey] = {};
+                  }
+                  newValue = _this.options.attrValueProcessors ? processItem(_this.options.attrValueProcessors, node.attributes[key], key) : node.attributes[key];
+                  processedKey = _this.options.attrNameProcessors ? processItem(_this.options.attrNameProcessors, key) : key;
+                  if (_this.options.mergeAttrs) {
+                    _this.assignOrPush(obj, processedKey, newValue);
+                  } else {
+                    defineProperty(obj[attrkey], processedKey, newValue);
+                  }
+                }
+              }
+              obj["#name"] = _this.options.tagNameProcessors ? processItem(_this.options.tagNameProcessors, node.name) : node.name;
+              if (_this.options.xmlns) {
+                obj[_this.options.xmlnskey] = {
+                  uri: node.uri,
+                  local: node.local
+                };
+              }
+              return stack.push(obj);
+            };
+          }(this);
+          this.saxParser.onclosetag = function (_this) {
+            return function () {
+              var cdata, emptyStr, key, node, nodeName, obj, objClone, old, s, xpath;
+              obj = stack.pop();
+              nodeName = obj["#name"];
+              if (!_this.options.explicitChildren || !_this.options.preserveChildrenOrder) {
+                delete obj["#name"];
+              }
+              if (obj.cdata === true) {
+                cdata = obj.cdata;
+                delete obj.cdata;
+              }
+              s = stack[stack.length - 1];
+              if (obj[charkey].match(/^\s*$/) && !cdata) {
+                emptyStr = obj[charkey];
+                delete obj[charkey];
+              } else {
+                if (_this.options.trim) {
+                  obj[charkey] = obj[charkey].trim();
+                }
+                if (_this.options.normalize) {
+                  obj[charkey] = obj[charkey].replace(/\s{2,}/g, " ").trim();
+                }
+                obj[charkey] = _this.options.valueProcessors ? processItem(_this.options.valueProcessors, obj[charkey], nodeName) : obj[charkey];
+                if (Object.keys(obj).length === 1 && charkey in obj && !_this.EXPLICIT_CHARKEY) {
+                  obj = obj[charkey];
+                }
+              }
+              if (isEmpty(obj)) {
+                if (typeof _this.options.emptyTag === 'function') {
+                  obj = _this.options.emptyTag();
+                } else {
+                  obj = _this.options.emptyTag !== '' ? _this.options.emptyTag : emptyStr;
+                }
+              }
+              if (_this.options.validator != null) {
+                xpath = "/" + function () {
+                  var i, len, results;
+                  results = [];
+                  for (i = 0, len = stack.length; i < len; i++) {
+                    node = stack[i];
+                    results.push(node["#name"]);
+                  }
+                  return results;
+                }().concat(nodeName).join("/");
+                (function () {
+                  var err;
+                  try {
+                    return obj = _this.options.validator(xpath, s && s[nodeName], obj);
+                  } catch (error1) {
+                    err = error1;
+                    return _this.emit("error", err);
+                  }
+                })();
+              }
+              if (_this.options.explicitChildren && !_this.options.mergeAttrs && _typeof(obj) === 'object') {
+                if (!_this.options.preserveChildrenOrder) {
+                  node = {};
+                  if (_this.options.attrkey in obj) {
+                    node[_this.options.attrkey] = obj[_this.options.attrkey];
+                    delete obj[_this.options.attrkey];
+                  }
+                  if (!_this.options.charsAsChildren && _this.options.charkey in obj) {
+                    node[_this.options.charkey] = obj[_this.options.charkey];
+                    delete obj[_this.options.charkey];
+                  }
+                  if (Object.getOwnPropertyNames(obj).length > 0) {
+                    node[_this.options.childkey] = obj;
+                  }
+                  obj = node;
+                } else if (s) {
+                  s[_this.options.childkey] = s[_this.options.childkey] || [];
+                  objClone = {};
+                  for (key in obj) {
+                    if (!hasProp.call(obj, key)) continue;
+                    defineProperty(objClone, key, obj[key]);
+                  }
+                  s[_this.options.childkey].push(objClone);
+                  delete obj["#name"];
+                  if (Object.keys(obj).length === 1 && charkey in obj && !_this.EXPLICIT_CHARKEY) {
+                    obj = obj[charkey];
+                  }
+                }
+              }
+              if (stack.length > 0) {
+                return _this.assignOrPush(s, nodeName, obj);
+              } else {
+                if (_this.options.explicitRoot) {
+                  old = obj;
+                  obj = {};
+                  defineProperty(obj, nodeName, old);
+                }
+                _this.resultObject = obj;
+                _this.saxParser.ended = true;
+                return _this.emit("end", _this.resultObject);
+              }
+            };
+          }(this);
+          ontext = function (_this) {
+            return function (text) {
+              var charChild, s;
+              s = stack[stack.length - 1];
+              if (s) {
+                s[charkey] += text;
+                if (_this.options.explicitChildren && _this.options.preserveChildrenOrder && _this.options.charsAsChildren && (_this.options.includeWhiteChars || text.replace(/\\n/g, '').trim() !== '')) {
+                  s[_this.options.childkey] = s[_this.options.childkey] || [];
+                  charChild = {
+                    '#name': '__text__'
+                  };
+                  charChild[charkey] = text;
+                  if (_this.options.normalize) {
+                    charChild[charkey] = charChild[charkey].replace(/\s{2,}/g, " ").trim();
+                  }
+                  s[_this.options.childkey].push(charChild);
+                }
+                return s;
+              }
+            };
+          }(this);
+          this.saxParser.ontext = ontext;
+          return this.saxParser.oncdata = function (_this) {
+            return function (text) {
+              var s;
+              s = ontext(text);
+              if (s) {
+                return s.cdata = true;
+              }
+            };
+          }();
+        };
+        Parser.prototype.parseString = function (str, cb) {
+          var err;
+          if (cb != null && typeof cb === "function") {
+            this.on("end", function (result) {
+              this.reset();
+              return cb(null, result);
+            });
+            this.on("error", function (err) {
+              this.reset();
+              return cb(err);
+            });
+          }
+          try {
+            str = str.toString();
+            if (str.trim() === '') {
+              this.emit("end", null);
+              return true;
+            }
+            str = bom.stripBOM(str);
+            if (this.options.async) {
+              this.remaining = str;
+              setImmediate(this.processAsync);
+              return this.saxParser;
+            }
+            return this.saxParser.write(str).close();
+          } catch (error1) {
+            err = error1;
+            if (!(this.saxParser.errThrown || this.saxParser.ended)) {
+              this.emit('error', err);
+              return this.saxParser.errThrown = true;
+            } else if (this.saxParser.ended) {
+              throw err;
+            }
+          }
+        };
+        Parser.prototype.parseStringPromise = function (str) {
+          return new Promise(function (_this) {
+            return function (resolve, reject) {
+              return _this.parseString(str, function (err, value) {
+                if (err) {
+                  return reject(err);
+                } else {
+                  return resolve(value);
+                }
+              });
+            };
+          }(this));
+        };
+        return Parser;
+      }(events);
+      exports.parseString = function (str, a, b) {
+        var cb, options, parser;
+        if (b != null) {
+          if (typeof b === 'function') {
+            cb = b;
+          }
+          if (_typeof(a) === 'object') {
+            options = a;
+          }
+        } else {
+          if (typeof a === 'function') {
+            cb = a;
+          }
+          options = {};
+        }
+        parser = new exports.Parser(options);
+        return parser.parseString(str, cb);
+      };
+      exports.parseStringPromise = function (str, a) {
+        var options, parser;
+        if (_typeof(a) === 'object') {
+          options = a;
+        }
+        parser = new exports.Parser(options);
+        return parser.parseStringPromise(str);
+      };
+    }).call(commonjsGlobal);
+  })(parser);
+  return parser;
+}
+
+// Generated by CoffeeScript 1.12.7
+(function () {
+
+  var builder,
+    defaults,
+    parser,
+    processors,
+    extend = function extend(child, parent) {
+      for (var key in parent) {
+        if (hasProp.call(parent, key)) child[key] = parent[key];
+      }
+      function ctor() {
+        this.constructor = child;
+      }
+      ctor.prototype = parent.prototype;
+      child.prototype = new ctor();
+      child.__super__ = parent.prototype;
+      return child;
+    },
+    hasProp = {}.hasOwnProperty;
+  defaults = requireDefaults();
+  builder = requireBuilder();
+  parser = requireParser();
+  processors = requireProcessors();
+  xml2js$1.defaults = defaults.defaults;
+  xml2js$1.processors = processors;
+  xml2js$1.ValidationError = function (superClass) {
+    extend(ValidationError, superClass);
+    function ValidationError(message) {
+      this.message = message;
+    }
+    return ValidationError;
+  }(Error);
+  xml2js$1.Builder = builder.Builder;
+  xml2js$1.Parser = parser.Parser;
+  xml2js$1.parseString = parser.parseString;
+  xml2js$1.parseStringPromise = parser.parseStringPromise;
+}).call(commonjsGlobal);
+
+var lib$2 = {exports: {}};
+
+/*
+object-assign
+(c) Sindre Sorhus
+@license MIT
+*/
+/* eslint-disable no-unused-vars */
+var getOwnPropertySymbols = Object.getOwnPropertySymbols;
+var hasOwnProperty$2 = Object.prototype.hasOwnProperty;
+var propIsEnumerable = Object.prototype.propertyIsEnumerable;
+function toObject(val) {
+  if (val === null || val === undefined) {
+    throw new TypeError('Object.assign cannot be called with null or undefined');
+  }
+  return Object(val);
+}
+function shouldUseNative() {
+  try {
+    if (!Object.assign) {
+      return false;
+    }
+
+    // Detect buggy property enumeration order in older V8 versions.
+
+    // https://bugs.chromium.org/p/v8/issues/detail?id=4118
+    var test1 = new String('abc'); // eslint-disable-line no-new-wrappers
+    test1[5] = 'de';
+    if (Object.getOwnPropertyNames(test1)[0] === '5') {
+      return false;
+    }
+
+    // https://bugs.chromium.org/p/v8/issues/detail?id=3056
+    var test2 = {};
+    for (var i = 0; i < 10; i++) {
+      test2['_' + String.fromCharCode(i)] = i;
+    }
+    var order2 = Object.getOwnPropertyNames(test2).map(function (n) {
+      return test2[n];
+    });
+    if (order2.join('') !== '0123456789') {
+      return false;
+    }
+
+    // https://bugs.chromium.org/p/v8/issues/detail?id=3056
+    var test3 = {};
+    'abcdefghijklmnopqrst'.split('').forEach(function (letter) {
+      test3[letter] = letter;
+    });
+    if (Object.keys(Object.assign({}, test3)).join('') !== 'abcdefghijklmnopqrst') {
+      return false;
+    }
+    return true;
+  } catch (err) {
+    // We don't expect any of the above to throw, but better to be safe.
+    return false;
+  }
+}
+var objectAssign = shouldUseNative() ? Object.assign : function (target, source) {
+  var from;
+  var to = toObject(target);
+  var symbols;
+  for (var s = 1; s < arguments.length; s++) {
+    from = Object(arguments[s]);
+    for (var key in from) {
+      if (hasOwnProperty$2.call(from, key)) {
+        to[key] = from[key];
+      }
+    }
+    if (getOwnPropertySymbols) {
+      symbols = getOwnPropertySymbols(from);
+      for (var i = 0; i < symbols.length; i++) {
+        if (propIsEnumerable.call(from, symbols[i])) {
+          to[symbols[i]] = from[symbols[i]];
+        }
+      }
+    }
+  }
+  return to;
+};
+
+var vary$2 = {exports: {}};
+
+/*!
+ * vary
+ * Copyright(c) 2014-2017 Douglas Christopher Wilson
+ * MIT Licensed
+ */
+
+/**
+ * Module exports.
+ */
+
+vary$2.exports = vary$1;
+vary$2.exports.append = append;
+
+/**
+ * RegExp to match field-name in RFC 7230 sec 3.2
+ *
+ * field-name    = token
+ * token         = 1*tchar
+ * tchar         = "!" / "#" / "$" / "%" / "&" / "'" / "*"
+ *               / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~"
+ *               / DIGIT / ALPHA
+ *               ; any VCHAR, except delimiters
+ */
+
+var FIELD_NAME_REGEXP = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/**
+ * Append a field to a vary header.
+ *
+ * @param {String} header
+ * @param {String|Array} field
+ * @return {String}
+ * @public
+ */
+
+function append(header, field) {
+  if (typeof header !== 'string') {
+    throw new TypeError('header argument is required');
+  }
+  if (!field) {
+    throw new TypeError('field argument is required');
+  }
+
+  // get fields array
+  var fields = !Array.isArray(field) ? parse$9(String(field)) : field;
+
+  // assert on invalid field names
+  for (var j = 0; j < fields.length; j++) {
+    if (!FIELD_NAME_REGEXP.test(fields[j])) {
+      throw new TypeError('field argument contains an invalid header name');
+    }
+  }
+
+  // existing, unspecified vary
+  if (header === '*') {
+    return header;
+  }
+
+  // enumerate current values
+  var val = header;
+  var vals = parse$9(header.toLowerCase());
+
+  // unspecified vary
+  if (fields.indexOf('*') !== -1 || vals.indexOf('*') !== -1) {
+    return '*';
+  }
+  for (var i = 0; i < fields.length; i++) {
+    var fld = fields[i].toLowerCase();
+
+    // append value (case-preserving)
+    if (vals.indexOf(fld) === -1) {
+      vals.push(fld);
+      val = val ? val + ', ' + fields[i] : fields[i];
+    }
+  }
+  return val;
+}
+
+/**
+ * Parse a vary header into an array.
+ *
+ * @param {String} header
+ * @return {Array}
+ * @private
+ */
+
+function parse$9(header) {
+  var end = 0;
+  var list = [];
+  var start = 0;
+
+  // gather tokens
+  for (var i = 0, len = header.length; i < len; i++) {
+    switch (header.charCodeAt(i)) {
+      case 0x20:
+        /*   */
+        if (start === end) {
+          start = end = i + 1;
+        }
+        break;
+      case 0x2c:
+        /* , */
+        list.push(header.substring(start, end));
+        start = end = i + 1;
+        break;
+      default:
+        end = i + 1;
+        break;
+    }
+  }
+
+  // final token
+  list.push(header.substring(start, end));
+  return list;
+}
+
+/**
+ * Mark that a request is varied on a header field.
+ *
+ * @param {Object} res
+ * @param {String|Array} field
+ * @public
+ */
+
+function vary$1(res, field) {
+  if (!res || !res.getHeader || !res.setHeader) {
+    // quack quack
+    throw new TypeError('res argument is required');
+  }
+
+  // get existing header
+  var val = res.getHeader('Vary') || '';
+  var header = Array.isArray(val) ? val.join(', ') : String(val);
+
+  // set new header
+  if (val = append(header, field)) {
+    res.setHeader('Vary', val);
+  }
+}
+var varyExports = vary$2.exports;
+
+(function () {
+
+  var assign = objectAssign;
+  var vary = varyExports;
+  var defaults = {
+    origin: '*',
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+    preflightContinue: false,
+    optionsSuccessStatus: 204
+  };
+  function isString(s) {
+    return typeof s === 'string' || s instanceof String;
+  }
+  function isOriginAllowed(origin, allowedOrigin) {
+    if (Array.isArray(allowedOrigin)) {
+      for (var i = 0; i < allowedOrigin.length; ++i) {
+        if (isOriginAllowed(origin, allowedOrigin[i])) {
+          return true;
+        }
+      }
+      return false;
+    } else if (isString(allowedOrigin)) {
+      return origin === allowedOrigin;
+    } else if (allowedOrigin instanceof RegExp) {
+      return allowedOrigin.test(origin);
+    } else {
+      return !!allowedOrigin;
+    }
+  }
+  function configureOrigin(options, req) {
+    var requestOrigin = req.headers.origin,
+      headers = [],
+      isAllowed;
+    if (!options.origin || options.origin === '*') {
+      // allow any origin
+      headers.push([{
+        key: 'Access-Control-Allow-Origin',
+        value: '*'
+      }]);
+    } else if (isString(options.origin)) {
+      // fixed origin
+      headers.push([{
+        key: 'Access-Control-Allow-Origin',
+        value: options.origin
+      }]);
+      headers.push([{
+        key: 'Vary',
+        value: 'Origin'
+      }]);
+    } else {
+      isAllowed = isOriginAllowed(requestOrigin, options.origin);
+      // reflect origin
+      headers.push([{
+        key: 'Access-Control-Allow-Origin',
+        value: isAllowed ? requestOrigin : false
+      }]);
+      headers.push([{
+        key: 'Vary',
+        value: 'Origin'
+      }]);
+    }
+    return headers;
+  }
+  function configureMethods(options) {
+    var methods = options.methods;
+    if (methods.join) {
+      methods = options.methods.join(','); // .methods is an array, so turn it into a string
+    }
+    return {
+      key: 'Access-Control-Allow-Methods',
+      value: methods
+    };
+  }
+  function configureCredentials(options) {
+    if (options.credentials === true) {
+      return {
+        key: 'Access-Control-Allow-Credentials',
+        value: 'true'
+      };
+    }
+    return null;
+  }
+  function configureAllowedHeaders(options, req) {
+    var allowedHeaders = options.allowedHeaders || options.headers;
+    var headers = [];
+    if (!allowedHeaders) {
+      allowedHeaders = req.headers['access-control-request-headers']; // .headers wasn't specified, so reflect the request headers
+      headers.push([{
+        key: 'Vary',
+        value: 'Access-Control-Request-Headers'
+      }]);
+    } else if (allowedHeaders.join) {
+      allowedHeaders = allowedHeaders.join(','); // .headers is an array, so turn it into a string
+    }
+    if (allowedHeaders && allowedHeaders.length) {
+      headers.push([{
+        key: 'Access-Control-Allow-Headers',
+        value: allowedHeaders
+      }]);
+    }
+    return headers;
+  }
+  function configureExposedHeaders(options) {
+    var headers = options.exposedHeaders;
+    if (!headers) {
+      return null;
+    } else if (headers.join) {
+      headers = headers.join(','); // .headers is an array, so turn it into a string
+    }
+    if (headers && headers.length) {
+      return {
+        key: 'Access-Control-Expose-Headers',
+        value: headers
+      };
+    }
+    return null;
+  }
+  function configureMaxAge(options) {
+    var maxAge = (typeof options.maxAge === 'number' || options.maxAge) && options.maxAge.toString();
+    if (maxAge && maxAge.length) {
+      return {
+        key: 'Access-Control-Max-Age',
+        value: maxAge
+      };
+    }
+    return null;
+  }
+  function applyHeaders(headers, res) {
+    for (var i = 0, n = headers.length; i < n; i++) {
+      var header = headers[i];
+      if (header) {
+        if (Array.isArray(header)) {
+          applyHeaders(header, res);
+        } else if (header.key === 'Vary' && header.value) {
+          vary(res, header.value);
+        } else if (header.value) {
+          res.setHeader(header.key, header.value);
+        }
+      }
+    }
+  }
+  function cors(options, req, res, next) {
+    var headers = [],
+      method = req.method && req.method.toUpperCase && req.method.toUpperCase();
+    if (method === 'OPTIONS') {
+      // preflight
+      headers.push(configureOrigin(options, req));
+      headers.push(configureCredentials(options));
+      headers.push(configureMethods(options));
+      headers.push(configureAllowedHeaders(options, req));
+      headers.push(configureMaxAge(options));
+      headers.push(configureExposedHeaders(options));
+      applyHeaders(headers, res);
+      if (options.preflightContinue) {
+        next();
+      } else {
+        // Safari (and potentially other browsers) need content-length 0,
+        //   for 204 or they just hang waiting for a body
+        res.statusCode = options.optionsSuccessStatus;
+        res.setHeader('Content-Length', '0');
+        res.end();
+      }
+    } else {
+      // actual response
+      headers.push(configureOrigin(options, req));
+      headers.push(configureCredentials(options));
+      headers.push(configureExposedHeaders(options));
+      applyHeaders(headers, res);
+      next();
+    }
+  }
+  function middlewareWrapper(o) {
+    // if options are static (either via defaults or custom options passed in), wrap in a function
+    var optionsCallback = null;
+    if (typeof o === 'function') {
+      optionsCallback = o;
+    } else {
+      optionsCallback = function optionsCallback(req, cb) {
+        cb(null, o);
+      };
+    }
+    return function corsMiddleware(req, res, next) {
+      optionsCallback(req, function (err, options) {
+        if (err) {
+          next(err);
+        } else {
+          var corsOptions = assign({}, defaults, options);
+          var originCallback = null;
+          if (corsOptions.origin && typeof corsOptions.origin === 'function') {
+            originCallback = corsOptions.origin;
+          } else if (corsOptions.origin) {
+            originCallback = function originCallback(origin, cb) {
+              cb(null, corsOptions.origin);
+            };
+          }
+          if (originCallback) {
+            originCallback(req.headers.origin, function (err2, origin) {
+              if (err2 || !origin) {
+                next(err2);
+              } else {
+                corsOptions.origin = origin;
+                cors(corsOptions, req, res, next);
+              }
+            });
+          } else {
+            next();
+          }
+        }
+      });
+    };
+  }
+
+  // can pass either an options hash, an options delegate, or nothing
+  lib$2.exports = middlewareWrapper;
+})();
+var libExports = lib$2.exports;
+
+var gate$1 = {};
+
+gate$1.create = create;
+var util$3 = require$$0$4;
+var assert = require$$1$5;
+var noop$1 = function noop() {};
+function create(options) {
+  return new Gate(options);
+}
+function Gate(options) {
+  options = options || {};
+  var count = typeof options.count === 'number' ? options.count : -1;
+  var failFast = options.failFast !== false;
+  this._async = new Async(count, failFast);
+}
+Object.defineProperty(Gate.prototype, "count", {
+  get: function count() {
+    return this._async.count;
+  },
+  enumerable: true
+});
+Gate.prototype.latch = function latch(name, mapping) {
+  if (typeof name !== "string") {
+    mapping = name;
+    name = null;
+  }
+  return this._async.makeCallback(latch, name, mapping);
+};
+Gate.prototype.val = function val(value) {
+  return new Val(value);
+};
+Gate.prototype["await"] = function (callback) {
+  this._async["await"](callback);
+  this._async["await"] = noop$1;
+};
+function Val(value) {
+  this.value = value;
+}
+function Async(count, failFast) {
+  this.count = count;
+  this.failFast = failFast;
+  this.index = 0;
+  this.pending = 0;
+  this.canceled = false;
+  this.next = null;
+  this.error = null;
+  this.results = {};
+}
+Async.prototype["await"] = function (callback) {
+  if (this.error) {
+    next(this.error, null);
+  } else if (this.pending === 0 && this.count <= 0) {
+    next(null, this.results);
+  } else {
+    this.next = next;
+  }
+  function next(error, results) {
+    callback(error, results, new Gate());
+  }
+};
+Async.prototype.makeCallback = function makeCallback(caller, name, mapping) {
+  var type = _typeof(mapping);
+  assert(type !== 'undefined' || type !== 'number' || type !== 'object', 'An argument `mapping` must be a number or an object, if specified.');
+  if (this.count === 0) return noop$1;
+  if (this.count > 0) this.count--;
+  this.pending++;
+  var index = this.index++;
+  var location = getLocation(caller);
+  var self = this;
+  return function callback(error) {
+    var next = self.next;
+    self.pending--;
+    if (!self.canceled) {
+      if (error instanceof Error) {
+        if (!('gate_location' in error)) {
+          // expand the error object
+          error.gate_location = location;
+        }
+        if (self.failFast) {
+          self.canceled = true;
+          if (next) {
+            self.next = noop$1;
+            next(error, null);
+          } else {
+            self.error = error;
+          }
+          return;
+        }
+      }
+      var result = mapArguments(mapping, arguments);
+      if (name === null) {
+        self.results[index] = result;
+      } else {
+        self.results[name] = result;
+      }
+      if (self.pending === 0 && self.count <= 0 && next) {
+        self.next = noop$1;
+        next(null, self.results);
+      }
+    }
+  };
+  function mapArguments(mapping, args) {
+    if (typeof mapping === 'number') return args[mapping];
+    if (!mapping) return Array.prototype.slice.call(args);
+    return Object.keys(mapping).reduce(function (result, key) {
+      var value = mapping[key];
+      if (typeof value === 'number') {
+        result[key] = args[value];
+      } else if (value instanceof Val) {
+        result[key] = value.value;
+      } else {
+        result[key] = value;
+      }
+      return result;
+    }, {});
+  }
+  function getLocation(target) {
+    var originalPrepareStackTrace = Error.prepareStackTrace;
+    var originalStackTraceLimit = Error.stackTraceLimit;
+    Error.prepareStackTrace = prepareStackTrace;
+    Error.stackTraceLimit = 1;
+    var err = {};
+    Error.captureStackTrace(err, target);
+    var stack = err.stack;
+    Error.prepareStackTrace = originalPrepareStackTrace;
+    Error.stackTraceLimit = originalStackTraceLimit;
+    return util$3.format('%s:%d:%d', stack.getFileName(), stack.getLineNumber(), stack.getColumnNumber());
+  }
+  function prepareStackTrace() {
+    return arguments[1][0];
+  }
+};
+
+var uuid = uuid_1;
+var ssdp = peerSsdp;
+var fs$3 = require$$1$2;
+var ejs = ejs$1;
+var os = require$$2$2;
+var util$2 = require$$0$4;
+var events = require$$1$1;
+var http$3 = require$$7$1;
+var URL = require$$8;
+var xml2js = xml2js$1;
+var cors$1 = libExports;
+var gate = gate$1;
+var DEVICE_DESC_TEMPLATE = "<?xml version=\"1.0\"?>\n<root xmlns=\"urn:schemas-upnp-org:device-1-0\">\n  <specVersion>\n    <major>1</major>\n    <minor>0</minor>\n  </specVersion>\n  <URLBase><%=URLBase%></URLBase>\n  <device>\n    <deviceType>urn:dial-multiscreen-org:device:dial:1</deviceType>\n    <friendlyName><%=friendlyName%></friendlyName>\n    <manufacturer><%=manufacturer%></manufacturer>\n    <modelName><%=modelName%></modelName>\n    <UDN>uuid:<%=uuid%></UDN>\n    <iconList>\n      <icon>\n        <mimetype>image/png</mimetype>\n        <width>144</width>\n        <height>144</height>\n        <depth>32</depth>\n        <url>/img/icon.png</url>\n      </icon>\n    </iconList>\n    <serviceList>\n      <service>\n        <serviceType>urn:dial-multiscreen-org:service:dial:1</serviceType>\n        <serviceId>urn:dial-multiscreen-org:serviceId:dial</serviceId>\n        <controlURL>/ssdp/notfound</controlURL>\n        <eventSubURL>/ssdp/notfound</eventSubURL>\n        <SCPDURL>/ssdp/notfound</SCPDURL>\n      </service>\n    </serviceList>\n  </device>\n</root>\n";
+var APP_DESC_TEMPLATE = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<%\nvar ns = \"\";\nfor(var i in namespaces){\n   ns = ns + ' xmlns:'+i+'=\"'+namespaces[i]+'\"';\n}\n%>\n<service xmlns=\"urn:dial-multiscreen-org:schemas:dial\" <%-ns%> dialVer=\"1.7\">\n  <name><%=name%></name>\n  <options allowStop=\"<%=allowStop%>\"/>\n  <state><%=state%></state>\n  <% if(typeof rel != \"undefined\" && typeof href != \"undefined\" && href){ %>\n  <link rel=\"<%=rel%>\" href=\"<%=href%>\" />\n  <% } %>\n  <% if(typeof additionalData != \"undefined\"){ %>\n        <additionalData>\n  <%    for(var i in additionalData){ %>\n            <<%=i%>><%=additionalData[i]%></<%=i%>>\n  <%    } %>\n        </additionalData>\n  <% }  %>\n</service>\n";
+var DEVICE_DESC_RENDERER = ejs.compile(DEVICE_DESC_TEMPLATE);
+var APP_DESC_RENDERER = ejs.compile(APP_DESC_TEMPLATE);
+var SERVER = os.type() + "/" + os.release() + " UPnP/1.1 famium/0.0.1";
+var setupServer = function setupServer() {
+  var self = this;
+  var pref = self.prefix;
+  var peer = self.ssdpPeer;
+  var serviceTypes = ["urn:dial-multiscreen-org:service:dial:1", "urn:dial-multiscreen-org:device:dial:1", "upnp:rootdevice", "ssdp:all", "uuid:" + self.uuid];
+  var app = self.expressApp;
+  app.use(pref, function (req, res, next) {
+    if (req.is("text/plain") || req.is("text/xml") || req.is("text/json") || req.is("application/xml") || req.is("application/json") || req.is("application/x-www-form-urlencoded")) {
+      req.text = '';
+      req.length = 0;
+      req.setEncoding('utf8');
+      req.on('data', function (chunk) {
+        req.text += chunk;
+        req.length += chunk.length;
+      });
+      req.on('end', next);
+    } else {
+      next();
+    }
+  });
+  app.use(pref + "/apps", cors$1(self.corsOptionsAppsDelegate));
+  app.use(pref + "/ssdp", cors$1(self.corsOptionsSsdp));
+  app.get(pref + "/apps", function (req, rsp) {
+    rsp.sendStatus(204);
+  });
+  app.get(pref + "/apps/:appName", function (req, rsp) {
+    req.protocol + "://" + (req.hostname || req.ip || self.host) + ":" + self.port + pref;
+    var appName = req.params["appName"];
+    var app = self.delegate.getApp.call(req, appName);
+    if (app) {
+      var state = app.state || app.pid && "running" || "stopped";
+      var xml = APP_DESC_RENDERER({
+        name: appName,
+        state: state,
+        allowStop: app.allowStop == true,
+        rel: "run",
+        href: app.pid ? app.pid /*baseURL+"/apps/"+appName+"/"+app.pid*/ : null,
+        additionalData: app.additionalData,
+        namespaces: app.namespaces || {}
+      });
+      rsp.type('application/xml');
+      rsp.send(xml);
+    } else {
+      rsp.sendStatus(404);
+    }
+  });
+  app.post(pref + "/apps/:appName", function (req, rsp) {
+    var baseURL = req.protocol + "://" + (req.hostname || req.ip || self.host) + ":" + self.port + pref;
+    var appName = req.params["appName"];
+    var app = self.delegate.getApp.call(this, appName);
+    if (!app) {
+      rsp.sendStatus(404);
+    } else if (req.length && req.length > self.maxContentLength) {
+      rsp.sendStatus(413); // Request Entity Too Large
+    } else {
+      var state = app.state || app.pid && "running" || "stopped";
+      self.delegate.launchApp.call(req, appName, req.text || null, function (pid, err) {
+        if (err) {
+          rsp.sendStatus(503);
+        } else if (pid) {
+          rsp.setHeader('LOCATION', baseURL + "/apps/" + appName + "/" + pid);
+          rsp.sendStatus(state == "stopped" ? 201 : 200);
+        } else {
+          //rsp.sendStatus(500);
+          rsp.sendStatus(state == "stopped" ? 201 : 200);
+        }
+      });
+    }
+  });
+  app.post(pref + "/apps/:appName/dial_data", function (req, rsp) {
+    req.protocol + "://" + (req.hostname || req.ip || self.host) + ":" + self.port + pref;
+    var appName = req.params["appName"];
+    var app = self.delegate.getApp.call(req, appName);
+    if (!app) {
+      rsp.sendStatus(404);
+    } else if (req.length && req.length > self.maxContentLength) {
+      rsp.sendStatus(413); // Request Entity Too Large
+    } else {
+      // TODO return dial app data
+      rsp.sendStatus(501);
+    }
+  });
+  app["delete"](pref + "/apps/:appName/:pid", function (req, rsp) {
+    req.protocol + "://" + (req.hostname || req.ip || self.host) + ":" + self.port + pref;
+    var appName = req.params["appName"];
+    var pid = req.params["pid"];
+    var app = self.delegate.getApp.call(req, appName);
+    if (app) {
+      if (app.allowStop) {
+        if (pid) {
+          self.delegate.stopApp.call(req, appName, pid, function (stopped) {
+            rsp.sendStatus(stopped ? 200 : 400);
+          });
+        } else {
+          rsp.sendStatus(400);
+        }
+      } else {
+        rsp.sendStatus(405);
+      }
+    } else {
+      rsp.sendStatus(404);
+    }
+  });
+  app.get(pref + "/ssdp/device-desc.xml", function (req, rsp) {
+    var baseURL = req.protocol + "://" + (req.hostname || req.ip || self.host) + ":" + self.port + pref;
+    var xml = DEVICE_DESC_RENDERER({
+      URLBase: baseURL,
+      friendlyName: self.friendlyName,
+      manufacturer: self.manufacturer,
+      modelName: self.modelName,
+      uuid: self.uuid
+    });
+    rsp.setHeader('Content-Type', 'application/xml');
+    rsp.setHeader('Application-URL', baseURL + "/apps");
+    rsp.send(xml);
+  });
+  app.get(pref + "/ssdp/notfound", function (req, rsp) {
+    rsp.sendStatus(404);
+  });
+  //var location = "http://"+self.host+":"+self.port+pref+"/ssdp/device-desc.xml";
+  var location = "http://{{networkInterfaceAddress}}:" + self.port + pref + "/ssdp/device-desc.xml";
+  peer.on("ready", function () {
+    for (var i = 0; i < serviceTypes.length; i++) {
+      var st = serviceTypes[i];
+      peer.alive(merge$2({
+        NT: st,
+        USN: "uuid:" + self.uuid + "::" + st,
+        SERVER: SERVER,
+        LOCATION: location
+      }, self.extraHeaders));
+    }
+    self.emit("ready");
+  }).on("search", function (headers, address) {
+    if (serviceTypes.indexOf(headers.ST) != -1) {
+      peer.reply(merge$2({
+        LOCATION: location,
+        ST: headers.ST,
+        "CONFIGID.UPNP.ORG": 7337,
+        "BOOTID.UPNP.ORG": 7337,
+        SERVER: SERVER,
+        USN: "uuid:" + self.uuid + "::" + headers.ST
+      }, self.extraHeaders), address);
+    }
+  }).on("close", function () {
+    self.emit("stop");
+  });
+};
+var getExtraHeaders = function getExtraHeaders(dict) {
+  var extraHeaders = {};
+  if (_typeof(dict) == "object") {
+    for (var key in dict) {
+      var value = dict[key];
+      if (typeof value == "number" || typeof value == "string" || typeof value == "boolean") {
+        extraHeaders[key] = value;
+      }
+    }
+  }
+  return extraHeaders;
+};
+var merge$2 = function merge(obj1, obj2) {
+  for (var key in obj2) {
+    var val1 = obj1[key];
+    obj1[key] = val1 || obj2[key];
+  }
+  return obj1;
+};
+/**
+ * 
+ */
+var DIALServer = function DIALServer(options) {
+  this.expressApp = options.expressApp || null;
+  this.prefix = options.prefix || "";
+  this.port = options.port || null;
+  this.host = options.host || null;
+  this.uuid = options.uuid || uuid.v4();
+  this.friendlyName = options.friendlyName || os.hostname() || "unknown";
+  this.manufacturer = options.manufacturer || "unknown manufacturer";
+  this.modelName = options.modelName || "unknown model";
+  this.maxContentLength = Math.max(parseInt(options.maxContentLength) || 4096, 4096);
+  this.extraHeaders = getExtraHeaders(options.extraHeaders);
+  this.delegate = {};
+  this.delegate.getApp = options.delegate && typeof options.delegate.getApp == "function" ? options.delegate.getApp : null;
+  this.delegate.launchApp = options.delegate && typeof options.delegate.launchApp == "function" ? options.delegate.launchApp : null;
+  this.delegate.stopApp = options.delegate && typeof options.delegate.stopApp == "function" ? options.delegate.stopApp : null;
+  var corsAllowOrigins = options.corsAllowOrigins || false; // no origin allowed by default
+  this.corsOptionsSsdp = {
+    origin: corsAllowOrigins,
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+    exposedHeaders: ['Location']
+  };
+  var corsOptionsApps = {
+    origin: corsAllowOrigins,
+    methods: ['GET', 'POST', 'DELETE', 'OPTIONS']
+  };
+  this.corsOptionsAppsDelegate = function (req, callback) {
+    var origin = req.header('origin');
+    if (!origin) {
+      // no cors headers
+      callback(null, {
+        origin: false
+      });
+    } else if (!/^(http|https|file):/i.test(origin)) {
+      // include cors headers and allow every origin for any scheme not http[s]/file
+      callback(null, {
+        origin: true
+      });
+    } else {
+      callback(null, corsOptionsApps);
+    }
+  };
+  this.ssdpPeer = ssdp.createPeer({
+    bindToInterfaces: options.bindToInterfaces,
+    bindToAddresses: options.bindToAddresses
+  });
+  setupServer.call(this);
+};
+util$2.inherits(DIALServer, events.EventEmitter);
+DIALServer.prototype.start = function () {
+  this.ssdpPeer.start();
+};
+DIALServer.prototype.stop = function () {
+  var self = this;
+  var pref = self.prefix;
+  var serviceTypes = ["urn:dial-multiscreen-org:service:dial:1", "urn:dial-multiscreen-org:device:dial:1", "upnp:rootdevice", "ssdp:all", "uuid:" + self.uuid];
+  //var location = "http://"+self.host+":"+self.port+pref+"/ssdp/device-desc.xml";
+  var location = "http://{{networkInterfaceAddress}}:" + self.port + pref + "/ssdp/device-desc.xml";
+  var peer = self.ssdpPeer;
+  var g = gate.create();
+  for (var i = 0; i < serviceTypes.length; i++) {
+    var st = serviceTypes[i];
+    peer.byebye(merge$2({
+      NT: st,
+      USN: "uuid:" + self.uuid + "::" + st,
+      SERVER: SERVER,
+      LOCATION: location
+    }, self.extraHeaders), g.latch());
+  }
+  g["await"](function () {
+    self.ssdpPeer.close();
+  });
+};
+var DIALClient = function DIALClient(options) {
+  var serviceTypes = ["urn:dial-multiscreen-org:service:dial:1", "urn:dial-multiscreen-org:device:dial:1"];
+  var self = this;
+  var services = {};
+  this.ssdpPeer = new ssdp.createPeer();
+  this.ssdpPeer.on("ready", function () {
+    self.ssdpPeer.search({
+      ST: "urn:dial-multiscreen-org:device:dial:1"
+    });
+    self.ssdpPeer.search({
+      ST: "urn:dial-multiscreen-org:service:dial:1"
+    });
+    self.emit("ready");
+  }).on("found", function (headers, address) {
+    var location = headers.LOCATION;
+    if (location && !services[location]) {
+      services[location] = headers;
+      self.emit("found", location, headers);
+    }
+  }).on("notify", function (headers, address) {
+    var location = headers.LOCATION;
+    var nts = headers.NTS;
+    var nt = headers.NT;
+    if (serviceTypes.indexOf(nt) >= 0) {
+      if (location && nts == "ssdp:alive" && !services[location]) {
+        services[location] = headers;
+        self.emit("found", location, headers);
+      } else if (location && nts == "ssdp:byebye" && services[location]) {
+        var service = services[location];
+        delete services[location];
+        self.emit("disappear", location, service);
+      }
+    }
+  }).on("close", function () {
+    self.emit("stop");
+  });
+  var start = function start() {
+    this.ssdpPeer.start();
+  };
+  var refresh = function refresh() {
+    services = {};
+    this.ssdpPeer.search({
+      ST: "urn:dial-multiscreen-org:device:dial:1"
+    });
+    this.ssdpPeer.search({
+      ST: "urn:dial-multiscreen-org:service:dial:1"
+    });
+  };
+  var stop = function stop() {
+    this.ssdpPeer.close();
+  };
+  var getDialDevice = function getDialDevice(deviceDescriptionUrl, callback) {
+    http$3.get(deviceDescriptionUrl, function (res) {
+      var applicationUrl = res.headers["application-url"];
+      if (res.statusCode == 200 && applicationUrl) {
+        if (applicationUrl.lastIndexOf("/") == applicationUrl.length - 1) {
+          applicationUrl = applicationUrl.substr(0, applicationUrl.length - 1);
+        }
+        var deviceDescriptionXml = "";
+        res.setEncoding('utf8');
+        res.on('data', function (chunk) {
+          deviceDescriptionXml += chunk;
+        });
+        res.on('end', function () {
+          xml2js.parseString(deviceDescriptionXml, {
+            trim: true,
+            explicitArray: false
+          }, function (err, deviceDescription) {
+            if (err) {
+              callback(null, err);
+            } else {
+              try {
+                var deviceInfo = deviceDescription.root.device;
+                deviceInfo.descriptionUrl = deviceDescriptionUrl;
+                deviceInfo.applicationUrl = applicationUrl;
+                var dialDevice = new DialDevice(deviceInfo);
+                callback(dialDevice);
+              } catch (err) {
+                callback(null, err);
+              }
+            }
+          });
+        });
+      } else {
+        var err = new Error("Cannot get device description from " + deviceDescriptionUrl + " or Application-URL header is not set");
+        callback && callback(null, err);
+      }
+    }).on('error', function (err) {
+      callback && callback(null, err);
+    });
+  };
+  Object.defineProperty(this, "start", {
+    get: function get() {
+      return start;
+    }
+  });
+  Object.defineProperty(this, "refresh", {
+    get: function get() {
+      return refresh;
+    }
+  });
+  Object.defineProperty(this, "stop", {
+    get: function get() {
+      return stop;
+    }
+  });
+  Object.defineProperty(this, "getDialDevice", {
+    get: function get() {
+      return getDialDevice;
+    }
+  });
+};
+util$2.inherits(DIALClient, events.EventEmitter);
+var DialDevice = function DialDevice(deviceInfo) {
+  this.descriptionUrl = deviceInfo.descriptionUrl;
+  this.applicationUrl = deviceInfo.applicationUrl;
+  this.deviceType = deviceInfo.deviceType;
+  this.friendlyName = deviceInfo.friendlyName;
+  this.manufacturer = deviceInfo.manufacturer;
+  this.modelName = deviceInfo.modelName;
+  this.UDN = deviceInfo.UDN;
+  this.icons = [];
+  if (deviceInfo.iconList instanceof Array) {
+    for (var i = 0; i < deviceInfo.iconList.length; i++) {
+      var item = deviceInfo.iconList[i];
+      item && item.icon && this.icons.push(item.icon);
+    }
+  } else if (deviceInfo.iconList && deviceInfo.iconList.icon) {
+    this.icons.push(deviceInfo.iconList.icon);
+  }
+};
+DialDevice.prototype.getAppInfoXml = function (appName, callback) {
+  var appUrl = this.applicationUrl && appName && this.applicationUrl + "/" + appName || null;
+  if (!appUrl) {
+    var err = new Error("DIAL appName and DIAL Application-URL cannot be empty for getAppInfo");
+    callback && callback(null, err);
+    return;
+  }
+  http$3.get(appUrl, function (res) {
+    if (res.statusCode == 200) {
+      var appInfoXml = "";
+      res.setEncoding('utf8');
+      res.on('data', function (chunk) {
+        appInfoXml += chunk;
+      });
+      res.on('end', function () {
+        callback(appInfoXml);
+      });
+    } else {
+      var err = new Error("Cannot get app info from " + appUrl);
+      err.code = res.statusCode;
+      callback && callback(null, err);
+    }
+  }).on('error', function (err) {
+    callback && callback(null, err);
+  });
+};
+DialDevice.prototype.getAppInfo = function (appName, callback) {
+  this.getAppInfoXml(appName, function (appInfoXml, err) {
+    if (!appInfoXml || err) {
+      callback(null, err);
+    } else {
+      xml2js.parseString(appInfoXml, {
+        trim: true,
+        explicitArray: false,
+        mergeAttrs: true,
+        explicitRoot: false,
+        tagNameProcessors: [function (tagName) {
+          tagName = tagName.substr(tagName.indexOf(":") + 1);
+          return tagName;
+        }],
+        attrNameProcessors: [function (attrName) {
+          attrName = attrName.substr(attrName.indexOf(":") + 1);
+          return attrName;
+        }]
+      }, function (err, appInfo) {
+        if (err) {
+          callback(null, err);
+        } else {
+          callback(appInfo);
+        }
+      });
+    }
+  });
+};
+DialDevice.prototype.launchApp = function (appName, launchData, contentType, callback) {
+  var appUrl = this.applicationUrl && appName && this.applicationUrl + "/" + appName || null;
+  if (!appUrl) {
+    var err = new Error("DIAL appName and DIAL Application-URL cannot be empty for launchApp");
+    callback && callback(null, err);
+    return;
+  }
+  appUrl = URL.parse(appUrl);
+  var contentLength = launchData && Buffer.byteLength(launchData) || 0;
+  var options = {
+    host: appUrl.hostname,
+    port: appUrl.port,
+    path: appUrl.path,
+    method: 'POST',
+    headers: {
+      'CONTENT-TYPE': contentType || 'text/plain; charset="utf-8"',
+      'CONTENT-LENGTH': contentLength
+    }
+  };
+  var req = http$3.request(options, function (res) {
+    var launchRes = "";
+    res.setEncoding('utf8');
+    res.on('data', function (chunk) {
+      launchRes += chunk;
+    });
+    res.on('end', function () {
+      if (res.statusCode >= 400) {
+        var err = new Error("Cannot get app info from " + appUrl);
+        err.code = res.statusCode;
+        callback && callback(null, err);
+      } else {
+        callback && callback(launchRes);
+      }
+    });
+  }).on('error', function (err) {
+    callback && callback(null, err);
+  });
+  launchData && req.write(launchData);
+  req.end();
+};
+DialDevice.prototype.stopApp = function (appName, pid, callback) {
+  var stopUrl = this.applicationUrl && appName && pid && this.applicationUrl + "/" + appName + "/" + pid || null;
+  if (!stopUrl) {
+    var err = new Error("DIAL appName, pid and DIAL Application-URL cannot be empty for stopApp");
+    callback && callback(null, err);
+    return;
+  }
+  stopUrl = URL.parse(stopUrl);
+  var options = {
+    host: stopUrl.hostname,
+    port: stopUrl.port,
+    path: stopUrl.path,
+    method: 'DELETE'
+  };
+  var req = http$3.request(options, function (res) {
+    callback && callback(res.statusCode);
+  }).on('error', function (err) {
+    callback && callback(null, err);
+  });
+  req.end();
+};
+peerDial$1.Server = DIALServer;
+peerDial$1.Client = DIALClient;
+
+/*******************************************************************************
+ * 
+ * Copyright (c) 2015 Louay Bassbouss, Fraunhofer FOKUS, All rights reserved.
+ * 
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 3.0 of the License, or (at your option) any later version.
+ * 
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ * 
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library. If not, see <http://www.gnu.org/licenses/>. 
+ * 
+ * AUTHORS: Louay Bassbouss (louay.bassbouss@fokus.fraunhofer.de)
+ *
+ ******************************************************************************/
+var peerDial = peerDial$1;
+
+var express$2 = {exports: {}};
+
+var bodyParser = {exports: {}};
+
 /**
  * Module dependencies.
  */
 
-var relative = require$$0$3.relative;
+var relative = require$$1$3.relative;
 
 /**
  * Module exports.
@@ -705,7 +9724,7 @@ var TYPE_REGEXP = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
  */
 
 contentType.format = format$2;
-contentType.parse = parse$9;
+contentType.parse = parse$8;
 
 /**
  * Format object to media type.
@@ -749,7 +9768,7 @@ function format$2(obj) {
  * @public
  */
 
-function parse$9(string) {
+function parse$8(string) {
   if (!string) {
     throw new TypeError('argument string is required');
   }
@@ -1933,8 +10952,8 @@ function requireNode() {
   if (hasRequiredNode) return node.exports;
   hasRequiredNode = 1;
   (function (module, exports) {
-    var tty = require$$0$4;
-    var util = require$$1$1;
+    var tty = require$$0$6;
+    var util = require$$0$4;
 
     /**
      * This is the Node.js implementation of `debug()`.
@@ -2106,7 +11125,7 @@ function requireNode() {
           break;
         case 'PIPE':
         case 'TCP':
-          var net = require$$4$1;
+          var net = require$$4$2;
           stream = new net.Socket({
             fd: fd,
             readable: false,
@@ -2185,10 +11204,10 @@ var srcExports = src.exports;
  * @private
  */
 
-var EventEmitter = require$$0$5.EventEmitter;
+var EventEmitter = require$$1$1.EventEmitter;
 var ReadStream = require$$1$2.ReadStream;
-var Stream$1 = require$$1$3;
-var Zlib = require$$3$1;
+var Stream$1 = require$$1$6;
+var Zlib = require$$3$2;
 
 /**
  * Module exports.
@@ -2369,14 +11388,14 @@ function onOpenClose() {
   }
 }
 
-var lib$2 = {exports: {}};
+var lib$1 = {exports: {}};
 
 var safer_1;
 var hasRequiredSafer;
 function requireSafer() {
   if (hasRequiredSafer) return safer_1;
   hasRequiredSafer = 1;
-  var buffer = require$$0$6;
+  var buffer = require$$0$7;
   var Buffer = buffer.Buffer;
   var safer = {};
   var key;
@@ -12750,8 +21769,8 @@ var hasRequiredStreams;
 function requireStreams() {
   if (hasRequiredStreams) return streams;
   hasRequiredStreams = 1;
-  var Buffer = require$$0$6.Buffer,
-    Transform = require$$1$3.Transform;
+  var Buffer = require$$0$7.Buffer,
+    Transform = require$$1$6.Transform;
 
   // == Exports ==================================================================
   streams = function streams(iconv) {
@@ -12863,7 +21882,7 @@ var hasRequiredExtendNode;
 function requireExtendNode() {
   if (hasRequiredExtendNode) return extendNode;
   hasRequiredExtendNode = 1;
-  var Buffer = require$$0$6.Buffer;
+  var Buffer = require$$0$7.Buffer;
   // Note: not polyfilled with safer-buffer on a purpose, as overrides Buffer
 
   // == Extend Node primitives to use iconv-lite =================================
@@ -12900,7 +21919,7 @@ function requireExtendNode() {
       };
 
       // -- SlowBuffer -----------------------------------------------------------
-      var SlowBuffer = require$$0$6.SlowBuffer;
+      var SlowBuffer = require$$0$7.SlowBuffer;
       original.SlowBufferToString = SlowBuffer.prototype.toString;
       SlowBuffer.prototype.toString = function (encoding, start, end) {
         encoding = String(encoding || 'utf8').toLowerCase();
@@ -13026,7 +22045,7 @@ function requireExtendNode() {
 
       // -- Readable -------------------------------------------------------------
       if (iconv.supportsStreams) {
-        var Readable = require$$1$3.Readable;
+        var Readable = require$$1$6.Readable;
         original.ReadableSetEncoding = Readable.prototype.setEncoding;
         Readable.prototype.setEncoding = function setEncoding(enc, options) {
           // Use our own decoder, it has the same interface.
@@ -13043,7 +22062,7 @@ function requireExtendNode() {
       if (!iconv.supportsNodeEncodingsExtension) return;
       if (!original) throw new Error("require('iconv-lite').undoExtendNodeEncodings(): Nothing to undo; extendNodeEncodings() is not called.");
       delete Buffer.isNativeEncoding;
-      var SlowBuffer = require$$0$6.SlowBuffer;
+      var SlowBuffer = require$$0$7.SlowBuffer;
       SlowBuffer.prototype.toString = original.SlowBufferToString;
       SlowBuffer.prototype.write = original.SlowBufferWrite;
       Buffer.isEncoding = original.BufferIsEncoding;
@@ -13051,7 +22070,7 @@ function requireExtendNode() {
       Buffer.prototype.toString = original.BufferToString;
       Buffer.prototype.write = original.BufferWrite;
       if (iconv.supportsStreams) {
-        var Readable = require$$1$3.Readable;
+        var Readable = require$$1$6.Readable;
         Readable.prototype.setEncoding = original.ReadableSetEncoding;
         delete Readable.prototype.collect;
       }
@@ -13063,7 +22082,7 @@ function requireExtendNode() {
 
 var hasRequiredLib$1;
 function requireLib$1() {
-  if (hasRequiredLib$1) return lib$2.exports;
+  if (hasRequiredLib$1) return lib$1.exports;
   hasRequiredLib$1 = 1;
   (function (module) {
 
@@ -13184,8 +22203,8 @@ function requireLib$1() {
       // Load Node primitive extensions.
       requireExtendNode()(iconv);
     }
-  })(lib$2);
-  return lib$2.exports;
+  })(lib$1);
+  return lib$1.exports;
 }
 
 /*!
@@ -13877,7 +22896,7 @@ function requireRead() {
   var iconv = requireLib$1();
   var onFinished = onFinishedExports;
   var unpipe = unpipe_1;
-  var zlib = require$$3$1;
+  var zlib = require$$3$2;
 
   /**
    * Module exports.
@@ -14122,7 +23141,7 @@ var typeRegExp = /^ *([A-Za-z0-9][A-Za-z0-9!#$&^_-]{0,126})\/([A-Za-z0-9][A-Za-z
  */
 
 mediaTyper.format = format$1;
-mediaTyper.parse = parse$8;
+mediaTyper.parse = parse$7;
 
 /**
  * Format object to media type.
@@ -14181,7 +23200,7 @@ function format$1(obj) {
  * @api public
  */
 
-function parse$8(string) {
+function parse$7(string) {
   if (!string) {
     throw new TypeError('argument string is required');
   }
@@ -25023,7 +34042,7 @@ var mimeDb = require$$0;
    * @private
    */
   var db = mimeDb;
-  var extname = require$$0$3.extname;
+  var extname = require$$1$3.extname;
 
   /**
    * Module variables.
@@ -25895,7 +34914,7 @@ var hasRequiredUtil_inspect;
 function requireUtil_inspect() {
   if (hasRequiredUtil_inspect) return util_inspect;
   hasRequiredUtil_inspect = 1;
-  util_inspect = require$$1$1.inspect;
+  util_inspect = require$$0$4.inspect;
   return util_inspect;
 }
 
@@ -28283,10 +37302,10 @@ function requireStringify() {
   return stringify_1;
 }
 
-var parse$7;
+var parse$6;
 var hasRequiredParse;
 function requireParse() {
-  if (hasRequiredParse) return parse$7;
+  if (hasRequiredParse) return parse$6;
   hasRequiredParse = 1;
   var utils = requireUtils();
   var has = Object.prototype.hasOwnProperty;
@@ -28558,7 +37577,7 @@ function requireParse() {
       throwOnLimitExceeded: typeof opts.throwOnLimitExceeded === 'boolean' ? opts.throwOnLimitExceeded : false
     };
   };
-  parse$7 = function parse(str, opts) {
+  parse$6 = function parse(str, opts) {
     var options = normalizeParseOptions(opts);
     if (str === '' || str === null || typeof str === 'undefined') {
       return options.plainObjects ? {
@@ -28583,23 +37602,23 @@ function requireParse() {
     }
     return utils.compact(obj);
   };
-  return parse$7;
+  return parse$6;
 }
 
-var lib$1;
+var lib;
 var hasRequiredLib;
 function requireLib() {
-  if (hasRequiredLib) return lib$1;
+  if (hasRequiredLib) return lib;
   hasRequiredLib = 1;
   var stringify = requireStringify();
   var parse = requireParse();
   var formats = requireFormats();
-  lib$1 = {
+  lib = {
     formats: formats,
     parse: parse,
     stringify: stringify
   };
-  return lib$1;
+  return lib;
 }
 
 /*!
@@ -28821,7 +37840,7 @@ function requireUrlencoded() {
         mod = requireLib();
         break;
       case 'querystring':
-        mod = require$$8;
+        mod = require$$8$1;
         break;
     }
 
@@ -29047,7 +38066,7 @@ var mergeDescriptors = merge$1;
  * @private
  */
 
-var hasOwnProperty$2 = Object.prototype.hasOwnProperty;
+var hasOwnProperty$1 = Object.prototype.hasOwnProperty;
 
 /**
  * Merge the property descriptors of `src` into `dest`
@@ -29071,7 +38090,7 @@ function merge$1(dest, src, redefine) {
     redefine = true;
   }
   Object.getOwnPropertyNames(src).forEach(function forEachOwnPropertyName(name) {
-    if (!redefine && hasOwnProperty$2.call(dest, name)) {
+    if (!redefine && hasOwnProperty$1.call(dest, name)) {
       // Skip descriptor
       return;
     }
@@ -29223,8 +38242,8 @@ var parseurl$1 = {exports: {}};
  * @private
  */
 
-var url = require$$0$7;
-var parse$6 = url.parse;
+var url = require$$8;
+var parse$5 = url.parse;
 var Url = url.Url;
 
 /**
@@ -29297,7 +38316,7 @@ function originalurl(req) {
 
 function fastparse(str) {
   if (typeof str !== 'string' || str.charCodeAt(0) !== 0x2f /* / */) {
-    return parse$6(str);
+    return parse$5(str);
   }
   var pathname = str;
   var query = null;
@@ -29324,7 +38343,7 @@ function fastparse(str) {
       case 0x23: /* #  */
       case 0xa0:
       case 0xfeff:
-        return parse$6(str);
+        return parse$5(str);
     }
   }
   var url = Url !== undefined ? new Url() : {};
@@ -29870,7 +38889,7 @@ var debug$4 = srcExports('express:router:layer');
  * @private
  */
 
-var hasOwnProperty$1 = Object.prototype.hasOwnProperty;
+var hasOwnProperty = Object.prototype.hasOwnProperty;
 
 /**
  * Module exports.
@@ -29986,7 +39005,7 @@ Layer$2.prototype.match = function match(path) {
     var key = keys[i - 1];
     var prop = key.name;
     var val = decode_param(match[i]);
-    if (val !== undefined || !hasOwnProperty$1.call(params, prop)) {
+    if (val !== undefined || !hasOwnProperty.call(params, prop)) {
       params[prop] = val;
     }
   }
@@ -30028,7 +39047,7 @@ function decode_param(val) {
  * @private
  */
 
-var http$2 = require$$0$8;
+var http$2 = require$$7$1;
 
 /**
  * Module exports.
@@ -30991,7 +40010,7 @@ function commonjsRequire(path) {
  */
 
 var debug$1 = srcExports('express:view');
-var path$2 = require$$0$3;
+var path$2 = require$$1$3;
 var fs$2 = require$$1$2;
 
 /**
@@ -31149,7 +40168,7 @@ var safeBuffer = {exports: {}};
 /*! safe-buffer. MIT License. Feross Aboukhadijeh <https://feross.org/opensource> */
 (function (module, exports) {
   /* eslint-disable node/no-deprecated-api */
-  var buffer = require$$0$6;
+  var buffer = require$$0$7;
   var Buffer = buffer.Buffer;
 
   // alternative to using Object.keys for old browsers
@@ -31217,14 +40236,14 @@ var contentDisposition$2 = {exports: {}};
  */
 
 contentDisposition$2.exports = contentDisposition$1;
-contentDisposition$2.exports.parse = parse$5;
+contentDisposition$2.exports.parse = parse$4;
 
 /**
  * Module dependencies.
  * @private
  */
 
-var basename = require$$0$3.basename;
+var basename = require$$1$3.basename;
 var Buffer$2 = safeBufferExports.Buffer;
 
 /**
@@ -31496,7 +40515,7 @@ function getlatin1(val) {
  * @public
  */
 
-function parse$5(string) {
+function parse$4(string) {
   if (!string || typeof string !== 'string') {
     throw new TypeError('argument string is required');
   }
@@ -31635,7 +40654,7 @@ var etag_1 = etag$1;
  * @private
  */
 
-var crypto = require$$0$9;
+var crypto = require$$0$3;
 var Stats = require$$1$2.Stats;
 
 /**
@@ -34743,7 +43762,7 @@ var ms$1 = function ms(val, options) {
   options = options || {};
   var type = _typeof(val);
   if (type === 'string' && val.length > 0) {
-    return parse$4(val);
+    return parse$3(val);
   } else if (type === 'number' && isFinite(val)) {
     return options["long"] ? fmtLong(val) : fmtShort(val);
   }
@@ -34758,7 +43777,7 @@ var ms$1 = function ms(val, options) {
  * @api private
  */
 
-function parse$4(str) {
+function parse$3(str) {
   str = String(str);
   if (str.length > 100) {
     return;
@@ -35049,10 +44068,10 @@ var mime$2 = mime_1;
 var ms = ms$1;
 var onFinished$1 = onFinishedExports;
 var parseRange$1 = rangeParser_1;
-var path$1 = require$$0$3;
+var path$1 = require$$1$3;
 var statuses$1 = statuses$3;
-var Stream = require$$1$3;
-var util = require$$1$1;
+var Stream = require$$1$6;
+var util = require$$0$4;
 
 /**
  * Path function references.
@@ -36082,7 +45101,7 @@ function forwarded$1(req) {
   }
 
   // simple header parsing
-  var proxyAddrs = parse$3(req.headers['x-forwarded-for'] || '');
+  var proxyAddrs = parse$2(req.headers['x-forwarded-for'] || '');
   var socketAddr = getSocketAddr(req);
   var addrs = [socketAddr].concat(proxyAddrs);
 
@@ -36109,7 +45128,7 @@ function getSocketAddr(req) {
  * @private
  */
 
-function parse$3(header) {
+function parse$2(header) {
   var end = header.length;
   var list = [];
   var start = header.length;
@@ -37054,7 +46073,7 @@ var proxyAddrExports = proxyAddr.exports;
   var etag = etag_1;
   var proxyaddr = proxyAddrExports;
   var qs = requireLib();
-  var querystring = require$$8;
+  var querystring = require$$8$1;
 
   /**
    * Return strong ETag for `body`.
@@ -37352,14 +46371,14 @@ var proxyAddrExports = proxyAddr.exports;
   var query = requireQuery();
   var debug = srcExports('express:application');
   var View = view;
-  var http = require$$0$8;
+  var http = require$$7$1;
   var compileETag = utils.compileETag;
   var compileQueryParser = utils.compileQueryParser;
   var compileTrust = utils.compileTrust;
   var deprecate = depd_1('express');
   var flatten = arrayFlatten_1;
   var merge = utilsMergeExports;
-  var resolve = require$$0$3.resolve;
+  var resolve = require$$1$3.resolve;
   var setPrototypeOf = setprototypeof;
 
   /**
@@ -39039,12 +48058,12 @@ function validMime(type) {
 
 var accepts = accepts$1;
 var deprecate$1 = depd_1('express');
-var isIP = require$$4$1.isIP;
+var isIP = require$$4$2.isIP;
 var typeis = typeIsExports;
-var http$1 = require$$0$8;
+var http$1 = require$$7$1;
 var fresh = fresh_1;
 var parseRange = rangeParser_1;
-var parse$2 = parseurlExports;
+var parse$1 = parseurlExports;
 var proxyaddr = proxyAddrExports;
 
 /**
@@ -39405,7 +48424,7 @@ defineGetter(req, 'subdomains', function subdomains() {
  */
 
 defineGetter(req, 'path', function path() {
-  return parse$2(this).pathname;
+  return parse$1(this).pathname;
 });
 
 /**
@@ -39517,7 +48536,7 @@ var cookieSignature = {};
  * Module dependencies.
  */
 (function (exports) {
-  var crypto = require$$0$9;
+  var crypto = require$$0$3;
 
   /**
    * Sign the given `val` with `secret`.
@@ -39575,7 +48594,7 @@ var cookie$1 = {};
  * @public
  */
 
-cookie$1.parse = parse$1;
+cookie$1.parse = parse;
 cookie$1.serialize = serialize;
 
 /**
@@ -39660,7 +48679,7 @@ var pathValueRegExp = /^[\u0020-\u003A\u003D-\u007E]*$/;
  * @public
  */
 
-function parse$1(str, opt) {
+function parse(str, opt) {
   if (typeof str !== 'string') {
     throw new TypeError('argument str must be a string');
   }
@@ -39859,149 +48878,6 @@ function tryDecode(str, decode) {
   }
 }
 
-var vary$2 = {exports: {}};
-
-/*!
- * vary
- * Copyright(c) 2014-2017 Douglas Christopher Wilson
- * MIT Licensed
- */
-
-/**
- * Module exports.
- */
-
-vary$2.exports = vary$1;
-vary$2.exports.append = append;
-
-/**
- * RegExp to match field-name in RFC 7230 sec 3.2
- *
- * field-name    = token
- * token         = 1*tchar
- * tchar         = "!" / "#" / "$" / "%" / "&" / "'" / "*"
- *               / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~"
- *               / DIGIT / ALPHA
- *               ; any VCHAR, except delimiters
- */
-
-var FIELD_NAME_REGEXP = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
-
-/**
- * Append a field to a vary header.
- *
- * @param {String} header
- * @param {String|Array} field
- * @return {String}
- * @public
- */
-
-function append(header, field) {
-  if (typeof header !== 'string') {
-    throw new TypeError('header argument is required');
-  }
-  if (!field) {
-    throw new TypeError('field argument is required');
-  }
-
-  // get fields array
-  var fields = !Array.isArray(field) ? parse(String(field)) : field;
-
-  // assert on invalid field names
-  for (var j = 0; j < fields.length; j++) {
-    if (!FIELD_NAME_REGEXP.test(fields[j])) {
-      throw new TypeError('field argument contains an invalid header name');
-    }
-  }
-
-  // existing, unspecified vary
-  if (header === '*') {
-    return header;
-  }
-
-  // enumerate current values
-  var val = header;
-  var vals = parse(header.toLowerCase());
-
-  // unspecified vary
-  if (fields.indexOf('*') !== -1 || vals.indexOf('*') !== -1) {
-    return '*';
-  }
-  for (var i = 0; i < fields.length; i++) {
-    var fld = fields[i].toLowerCase();
-
-    // append value (case-preserving)
-    if (vals.indexOf(fld) === -1) {
-      vals.push(fld);
-      val = val ? val + ', ' + fields[i] : fields[i];
-    }
-  }
-  return val;
-}
-
-/**
- * Parse a vary header into an array.
- *
- * @param {String} header
- * @return {Array}
- * @private
- */
-
-function parse(header) {
-  var end = 0;
-  var list = [];
-  var start = 0;
-
-  // gather tokens
-  for (var i = 0, len = header.length; i < len; i++) {
-    switch (header.charCodeAt(i)) {
-      case 0x20:
-        /*   */
-        if (start === end) {
-          start = end = i + 1;
-        }
-        break;
-      case 0x2c:
-        /* , */
-        list.push(header.substring(start, end));
-        start = end = i + 1;
-        break;
-      default:
-        end = i + 1;
-        break;
-    }
-  }
-
-  // final token
-  list.push(header.substring(start, end));
-  return list;
-}
-
-/**
- * Mark that a request is varied on a header field.
- *
- * @param {Object} res
- * @param {String|Array} field
- * @public
- */
-
-function vary$1(res, field) {
-  if (!res || !res.getHeader || !res.setHeader) {
-    // quack quack
-    throw new TypeError('res argument is required');
-  }
-
-  // get existing header
-  var val = res.getHeader('Vary') || '';
-  var header = Array.isArray(val) ? val.join(', ') : String(val);
-
-  // set new header
-  if (val = append(header, field)) {
-    res.setHeader('Vary', val);
-  }
-}
-var varyExports = vary$2.exports;
-
 /**
  * Module dependencies.
  * @private
@@ -40013,10 +48889,10 @@ var createError = httpErrorsExports;
 var deprecate = depd_1('express');
 var encodeUrl = encodeurl;
 var escapeHtml = escapeHtml_1;
-var http = require$$0$8;
+var http = require$$7$1;
 var isAbsolute = utils.isAbsolute;
 var onFinished = onFinishedExports;
-var path = require$$0$3;
+var path = require$$1$3;
 var statuses = statuses$3;
 var merge = utilsMergeExports;
 var sign = cookieSignature.sign;
@@ -41132,9 +50008,9 @@ function requireServeStatic() {
   var encodeUrl = encodeurl;
   var escapeHtml = escapeHtml_1;
   var parseUrl = parseurlExports;
-  var resolve = require$$0$3.resolve;
+  var resolve = require$$1$3.resolve;
   var send = sendExports;
-  var url = require$$0$7;
+  var url = require$$8;
 
   /**
    * Module exports.
@@ -41320,7 +50196,7 @@ function requireServeStatic() {
    * Module dependencies.
    */
   var bodyParser = bodyParserExports;
-  var EventEmitter = require$$0$5.EventEmitter;
+  var EventEmitter = require$$1$1.EventEmitter;
   var mixin = mergeDescriptors;
   var proto = applicationExports;
   var Route = route;
@@ -41422,305 +50298,7 @@ var expressExports = express$2.exports;
  */
 var express$1 = expressExports;
 
-var lib = {exports: {}};
-
-/*
-object-assign
-(c) Sindre Sorhus
-@license MIT
-*/
-/* eslint-disable no-unused-vars */
-var getOwnPropertySymbols = Object.getOwnPropertySymbols;
-var hasOwnProperty = Object.prototype.hasOwnProperty;
-var propIsEnumerable = Object.prototype.propertyIsEnumerable;
-function toObject(val) {
-  if (val === null || val === undefined) {
-    throw new TypeError('Object.assign cannot be called with null or undefined');
-  }
-  return Object(val);
-}
-function shouldUseNative() {
-  try {
-    if (!Object.assign) {
-      return false;
-    }
-
-    // Detect buggy property enumeration order in older V8 versions.
-
-    // https://bugs.chromium.org/p/v8/issues/detail?id=4118
-    var test1 = new String('abc'); // eslint-disable-line no-new-wrappers
-    test1[5] = 'de';
-    if (Object.getOwnPropertyNames(test1)[0] === '5') {
-      return false;
-    }
-
-    // https://bugs.chromium.org/p/v8/issues/detail?id=3056
-    var test2 = {};
-    for (var i = 0; i < 10; i++) {
-      test2['_' + String.fromCharCode(i)] = i;
-    }
-    var order2 = Object.getOwnPropertyNames(test2).map(function (n) {
-      return test2[n];
-    });
-    if (order2.join('') !== '0123456789') {
-      return false;
-    }
-
-    // https://bugs.chromium.org/p/v8/issues/detail?id=3056
-    var test3 = {};
-    'abcdefghijklmnopqrst'.split('').forEach(function (letter) {
-      test3[letter] = letter;
-    });
-    if (Object.keys(Object.assign({}, test3)).join('') !== 'abcdefghijklmnopqrst') {
-      return false;
-    }
-    return true;
-  } catch (err) {
-    // We don't expect any of the above to throw, but better to be safe.
-    return false;
-  }
-}
-var objectAssign = shouldUseNative() ? Object.assign : function (target, source) {
-  var from;
-  var to = toObject(target);
-  var symbols;
-  for (var s = 1; s < arguments.length; s++) {
-    from = Object(arguments[s]);
-    for (var key in from) {
-      if (hasOwnProperty.call(from, key)) {
-        to[key] = from[key];
-      }
-    }
-    if (getOwnPropertySymbols) {
-      symbols = getOwnPropertySymbols(from);
-      for (var i = 0; i < symbols.length; i++) {
-        if (propIsEnumerable.call(from, symbols[i])) {
-          to[symbols[i]] = from[symbols[i]];
-        }
-      }
-    }
-  }
-  return to;
-};
-
-(function () {
-
-  var assign = objectAssign;
-  var vary = varyExports;
-  var defaults = {
-    origin: '*',
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
-    preflightContinue: false,
-    optionsSuccessStatus: 204
-  };
-  function isString(s) {
-    return typeof s === 'string' || s instanceof String;
-  }
-  function isOriginAllowed(origin, allowedOrigin) {
-    if (Array.isArray(allowedOrigin)) {
-      for (var i = 0; i < allowedOrigin.length; ++i) {
-        if (isOriginAllowed(origin, allowedOrigin[i])) {
-          return true;
-        }
-      }
-      return false;
-    } else if (isString(allowedOrigin)) {
-      return origin === allowedOrigin;
-    } else if (allowedOrigin instanceof RegExp) {
-      return allowedOrigin.test(origin);
-    } else {
-      return !!allowedOrigin;
-    }
-  }
-  function configureOrigin(options, req) {
-    var requestOrigin = req.headers.origin,
-      headers = [],
-      isAllowed;
-    if (!options.origin || options.origin === '*') {
-      // allow any origin
-      headers.push([{
-        key: 'Access-Control-Allow-Origin',
-        value: '*'
-      }]);
-    } else if (isString(options.origin)) {
-      // fixed origin
-      headers.push([{
-        key: 'Access-Control-Allow-Origin',
-        value: options.origin
-      }]);
-      headers.push([{
-        key: 'Vary',
-        value: 'Origin'
-      }]);
-    } else {
-      isAllowed = isOriginAllowed(requestOrigin, options.origin);
-      // reflect origin
-      headers.push([{
-        key: 'Access-Control-Allow-Origin',
-        value: isAllowed ? requestOrigin : false
-      }]);
-      headers.push([{
-        key: 'Vary',
-        value: 'Origin'
-      }]);
-    }
-    return headers;
-  }
-  function configureMethods(options) {
-    var methods = options.methods;
-    if (methods.join) {
-      methods = options.methods.join(','); // .methods is an array, so turn it into a string
-    }
-    return {
-      key: 'Access-Control-Allow-Methods',
-      value: methods
-    };
-  }
-  function configureCredentials(options) {
-    if (options.credentials === true) {
-      return {
-        key: 'Access-Control-Allow-Credentials',
-        value: 'true'
-      };
-    }
-    return null;
-  }
-  function configureAllowedHeaders(options, req) {
-    var allowedHeaders = options.allowedHeaders || options.headers;
-    var headers = [];
-    if (!allowedHeaders) {
-      allowedHeaders = req.headers['access-control-request-headers']; // .headers wasn't specified, so reflect the request headers
-      headers.push([{
-        key: 'Vary',
-        value: 'Access-Control-Request-Headers'
-      }]);
-    } else if (allowedHeaders.join) {
-      allowedHeaders = allowedHeaders.join(','); // .headers is an array, so turn it into a string
-    }
-    if (allowedHeaders && allowedHeaders.length) {
-      headers.push([{
-        key: 'Access-Control-Allow-Headers',
-        value: allowedHeaders
-      }]);
-    }
-    return headers;
-  }
-  function configureExposedHeaders(options) {
-    var headers = options.exposedHeaders;
-    if (!headers) {
-      return null;
-    } else if (headers.join) {
-      headers = headers.join(','); // .headers is an array, so turn it into a string
-    }
-    if (headers && headers.length) {
-      return {
-        key: 'Access-Control-Expose-Headers',
-        value: headers
-      };
-    }
-    return null;
-  }
-  function configureMaxAge(options) {
-    var maxAge = (typeof options.maxAge === 'number' || options.maxAge) && options.maxAge.toString();
-    if (maxAge && maxAge.length) {
-      return {
-        key: 'Access-Control-Max-Age',
-        value: maxAge
-      };
-    }
-    return null;
-  }
-  function applyHeaders(headers, res) {
-    for (var i = 0, n = headers.length; i < n; i++) {
-      var header = headers[i];
-      if (header) {
-        if (Array.isArray(header)) {
-          applyHeaders(header, res);
-        } else if (header.key === 'Vary' && header.value) {
-          vary(res, header.value);
-        } else if (header.value) {
-          res.setHeader(header.key, header.value);
-        }
-      }
-    }
-  }
-  function cors(options, req, res, next) {
-    var headers = [],
-      method = req.method && req.method.toUpperCase && req.method.toUpperCase();
-    if (method === 'OPTIONS') {
-      // preflight
-      headers.push(configureOrigin(options, req));
-      headers.push(configureCredentials(options));
-      headers.push(configureMethods(options));
-      headers.push(configureAllowedHeaders(options, req));
-      headers.push(configureMaxAge(options));
-      headers.push(configureExposedHeaders(options));
-      applyHeaders(headers, res);
-      if (options.preflightContinue) {
-        next();
-      } else {
-        // Safari (and potentially other browsers) need content-length 0,
-        //   for 204 or they just hang waiting for a body
-        res.statusCode = options.optionsSuccessStatus;
-        res.setHeader('Content-Length', '0');
-        res.end();
-      }
-    } else {
-      // actual response
-      headers.push(configureOrigin(options, req));
-      headers.push(configureCredentials(options));
-      headers.push(configureExposedHeaders(options));
-      applyHeaders(headers, res);
-      next();
-    }
-  }
-  function middlewareWrapper(o) {
-    // if options are static (either via defaults or custom options passed in), wrap in a function
-    var optionsCallback = null;
-    if (typeof o === 'function') {
-      optionsCallback = o;
-    } else {
-      optionsCallback = function optionsCallback(req, cb) {
-        cb(null, o);
-      };
-    }
-    return function corsMiddleware(req, res, next) {
-      optionsCallback(req, function (err, options) {
-        if (err) {
-          next(err);
-        } else {
-          var corsOptions = assign({}, defaults, options);
-          var originCallback = null;
-          if (corsOptions.origin && typeof corsOptions.origin === 'function') {
-            originCallback = corsOptions.origin;
-          } else if (corsOptions.origin) {
-            originCallback = function originCallback(origin, cb) {
-              cb(null, corsOptions.origin);
-            };
-          }
-          if (originCallback) {
-            originCallback(req.headers.origin, function (err2, origin) {
-              if (err2 || !origin) {
-                next(err2);
-              } else {
-                corsOptions.origin = origin;
-                cors(corsOptions, req, res, next);
-              }
-            });
-          } else {
-            next();
-          }
-        }
-      });
-    };
-  }
-
-  // can pass either an options hash, an options delegate, or nothing
-  lib.exports = middlewareWrapper;
-})();
-var libExports = lib.exports;
-
-var dial = require$$0$a;
+var dial = peerDial;
 var express = express$1;
 var cors = libExports;
 var app = express();
@@ -41819,4 +50397,3 @@ app.listen(PORT, function () {
 });
 
 module.exports = service;
-//# sourceMappingURL=service.js.map
