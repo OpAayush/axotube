@@ -22,3 +22,4 @@ import "./features/enableFeatures.js";
 import "./ui/customUI.js";
 import "./ui/customGuideAction.js";
 import "./features/autoFrameRate.js";
+import "./features/premiumLogo.js";

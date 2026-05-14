@@ -353,6 +353,11 @@ export default function modernUI(update, parameters) {
           value: "enableShorts",
         },
         {
+          name: "Premium Logo",
+          icon: "STAR",
+          value: "enablePremiumLogo",
+        },
+        {
           name: t("settings.options.misc.options.videoPreviews"),
           icon: "PREVIEW",
           value: "enablePreviews",
