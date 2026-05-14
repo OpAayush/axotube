@@ -34,37 +34,18 @@ function createFetchWithTimeout(timeout) {
 
 const fetchWithTimeout = createFetchWithTimeout(FETCH_TIMEOUT);
 
-function interceptYouTubeResponses() {
-  const origFetch = window.fetch;
-
-  window.fetch = function (...args) {
-    return origFetch.apply(this, args).then((response) => {
-      if (!response.ok) return response;
-
-      const url = args[0];
-      if (
-        typeof url === "string" &&
-        (url.includes("/youtubei/") ||
-          url.includes("www.youtube.com/youtubei/"))
-      ) {
-        const clonedResponse = response.clone();
-        clonedResponse
-          .json()
-          .then((data) => {
-            modifyYouTubeResponse(data);
-          })
-          .catch(() => {});
-
-        return response;
-      }
-      return response;
-    });
-  };
-}
-
-function modifyYouTubeResponse(r) {
-  if (!r || typeof r !== "object") return;
-
+/**
+ * This is a minimal reimplementation of the following uBlock Origin rule:
+ * https://github.com/uBlockOrigin/uAssets/blob/3497eebd440f4871830b9b45af0afc406c6eb593/filters/filters.txt#L116
+ *
+ * This in turn calls the following snippet:
+ * https://github.com/gorhill/uBlock/blob/bfdc81e9e400f7b78b2abc97576c3d7bf3a11a0b/assets/resources/scriptlets.js#L365-L470
+ *
+ * Seems like for now dropping just the adPlacements is enough for YouTube TV
+ */
+const origParse = JSON.parse;
+JSON.parse = function () {
+  const r = origParse.apply(this, arguments);
   const adBlockEnabled = configRead("enableAdBlock");
   const signinReminderEnabled = configRead("enableSigninReminder");
 
@@ -72,10 +53,12 @@ function modifyYouTubeResponse(r) {
     r.adPlacements = [];
   }
 
+  // Also set playerAds to false, just incase.
   if (r.playerAds && adBlockEnabled) {
     r.playerAds = false;
   }
 
+  // Also set adSlots to an empty array, emptying only the adPlacements won't work.
   if (r.adSlots && adBlockEnabled) {
     r.adSlots = [];
   }
@@ -102,6 +85,7 @@ function modifyYouTubeResponse(r) {
     }
   }
 
+  // Drop "masthead" ad from home screen
   if (
     r?.contents?.tvBrowseRenderer?.content?.tvSurfaceContentRenderer?.content
       ?.sectionListRenderer?.contents
@@ -151,16 +135,19 @@ function modifyYouTubeResponse(r) {
     r.messages = r.messages.filter((msg) => !msg?.youThereRenderer);
   }
 
+  // Remove shorts ads
   if (!Array.isArray(r) && r?.entries && adBlockEnabled) {
     r.entries = r.entries?.filter(
       (elm) => !elm?.command?.reelWatchEndpoint?.adClientParams?.isAd,
     );
   }
 
+  // Patch settings
   if (r?.title?.runs) {
     PatchSettings(r);
   }
 
+  // DeArrow Implementation
   if (r?.contents?.sectionListRenderer?.contents) {
     processShelves(r.contents.sectionListRenderer.contents);
   }
@@ -258,6 +245,7 @@ function modifyYouTubeResponse(r) {
     }
   }
 
+  // Manual SponsorBlock Skips
   if (
     configRead("sponsorBlockManualSkips").length > 0 &&
     r?.playerOverlays?.playerOverlayRenderer
@@ -327,9 +315,21 @@ function modifyYouTubeResponse(r) {
       }
     }
   }
-}
 
-interceptYouTubeResponses();
+  return r;
+};
+
+// CRITICAL: Patch JSON.parse on window._yttv instances
+window.JSON.parse = JSON.parse;
+for (const key in window._yttv) {
+  if (
+    window._yttv[key] &&
+    window._yttv[key].JSON &&
+    window._yttv[key].JSON.parse
+  ) {
+    window._yttv[key].JSON.parse = JSON.parse;
+  }
+}
 
 function processShelves(shelves, shouldAddPreviews = true) {
   for (const shelve of shelves) {
