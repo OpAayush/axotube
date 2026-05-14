@@ -14,6 +14,13 @@ export default {
     string({
       include: "**/*.css",
     }),
+
+    // ADD: Replace structuredClone with polyfill BEFORE babel processes it
+    replace({
+      structuredClone: "structuredClonePolyfill",
+      preventAssignment: true,
+    }),
+
     nodeResolve({
       browser: true,
       preferBuiltins: false,
@@ -22,23 +29,55 @@ export default {
       include: [/node_modules/, /mods/],
       transformMixedEsModules: true,
     }),
+
     getBabelOutputPlugin({
       babelHelpers: "bundled",
       presets: [
         [
           "@babel/preset-env",
           {
-            targets: "Chrome 47",
+            // Target MUCH older browsers for Tizen 4
+            targets: {
+              browsers: ["Chrome 40", "Safari 9", "IE 11"],
+            },
+            // Include ALL transforms, don't skip any
+            useBuiltIns: "entry",
+            corejs: 3,
+            modules: false,
           },
         ],
       ],
+      plugins: [
+        // Transform optional chaining and nullish coalescing explicitly
+        "@babel/plugin-transform-optional-chaining",
+        "@babel/plugin-transform-nullish-coalescing-operator",
+      ],
     }),
+
     terser({
-      ecma: "5",
-      mangle: true,
+      ecma: 5, // Output ES5 for old browsers
+      mangle: {
+        // Be careful with mangling - keep some names
+        reserved: ["structuredClonePolyfill", "h5vcc", "_yttv", "localStorage"],
+      },
+      compress: {
+        // Less aggressive compression for compatibility
+        passes: 1,
+      },
     }),
+
+    // Final replace to inject structuredClone polyfill
     replace({
-      "\uFFFF": "\u0000",
+      structuredClonePolyfill: `(function() {
+        if (typeof structuredClone !== 'undefined') return structuredClone;
+        return function(obj) {
+          try {
+            return JSON.parse(JSON.stringify(obj));
+          } catch (e) {
+            return obj;
+          }
+        };
+      })()`,
       preventAssignment: true,
     }),
   ],

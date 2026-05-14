@@ -28,6 +28,8 @@
     "@rollup/plugin-commonjs": "^29.0.0",
     "@rollup/plugin-json": "^6.1.0",
     "@rollup/plugin-node-resolve": "^16.0.3",
-    "@rollup/plugin-replace": "^6.0.3"
+    "@rollup/plugin-replace": "^6.0.3",
+    "@babel/plugin-transform-optional-chaining": "^7.22.0",
+    "@babel/plugin-transform-nullish-coalescing-operator": "^7.22.0"
   }
 }
