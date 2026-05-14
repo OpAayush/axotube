@@ -73,7 +73,7 @@ function initConfig() {
   } catch (err) {
     console.warn("Config read failed:", err);
   }
-  localConfig = structuredClone(defaultConfig);
+  localConfig = JSON.parse(JSON.stringify(defaultConfig));
 }
 
 initConfig();
@@ -109,7 +109,7 @@ export function configRead(key) {
       "with default value",
       defaultConfig[key],
     );
-    localConfig[key] = structuredClone(defaultConfig[key]);
+    localConfig[key] = JSON.parse(JSON.stringify(defaultConfig[key]));
   }
   return localConfig[key];
 }

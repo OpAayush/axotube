@@ -5,21 +5,29 @@ import replace from "@rollup/plugin-replace";
 import json from "@rollup/plugin-json";
 import fs from "fs";
 
-// Custom Rollup plugin to inject XML content
 function injectXmlContent() {
   return {
     name: "inject-xml-content",
     renderChunk(code) {
       const pattern =
-        /var\s+(\w+)_TEMPLATE\s+=\s+fs\$3\.readFileSync\(__dirname\s+\+\s+'\/\.\.\/xml\/([^']+)'\s*,\s*'utf8'\);/g;
+        /var\s+(\w+)_TEMPLATE\s+=\s+.*?readFileSync\([^)]*?'([^']+)'[^)]*?\);/g;
 
-      const modifiedCode = code.replace(pattern, (match, varName, fileName) => {
-        const xmlContent = fs.readFileSync(
-          `node_modules/@patrickkfkan/peer-dial/xml/${fileName}`,
-          "utf8",
-        );
-        return `var ${varName}_TEMPLATE = ${JSON.stringify(xmlContent)};`;
-      });
+      let modifiedCode = code;
+      modifiedCode = modifiedCode.replace(
+        pattern,
+        (match, varName, fileName) => {
+          try {
+            const xmlContent = fs.readFileSync(
+              `node_modules/@patrickkfkan/peer-dial/xml/${fileName}`,
+              "utf8",
+            );
+            return `var ${varName}_TEMPLATE = ${JSON.stringify(xmlContent)};`;
+          } catch (err) {
+            console.warn(`⚠️ Failed to inject XML: ${fileName}`, err.message);
+            return match; // Keep original if failed
+          }
+        },
+      );
 
       return { code: modifiedCode, map: null };
     },
@@ -31,6 +39,13 @@ export default {
   output: {
     file: "../dist/service.js",
     format: "cjs",
+    sourcemap: true, // ← For debugging
+  },
+  external: ["@patrickkfkan/peer-dial"], // ← If it should be external
+  onwarn(warning) {
+    if (warning.code !== "CIRCULAR_DEPENDENCY") {
+      console.warn(warning.message);
+    }
   },
   plugins: [
     injectXmlContent(),
