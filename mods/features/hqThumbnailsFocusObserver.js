@@ -19,68 +19,84 @@ function extractVideoIdFromThumbnailUrl(url) {
 
   const match = url.match(/\/vi\/([a-zA-Z0-9_-]+)\//);
   return match ? match[1] : null;
-}
+} // Global cache to prevent SPA DOM revert flickering
+const qualityCache = new Map();
 
-function upgradeThumbnailQuality(imgElement) {
+function upgradeThumbnailQuality(element) {
   if (!configRead("enableHqThumbnails")) return;
-  if (!imgElement || !imgElement.src) return;
+  if (!element) return;
 
-  // Only process standard video thumbnails
-  if (!imgElement.src.includes("i.ytimg.com/vi/")) return;
+  let currentUrl = "";
+  let isBackgroundImage = false;
 
-  const videoId = extractVideoIdFromThumbnailUrl(imgElement.src);
+  if (element.tagName === "IMG" && element.src) {
+    currentUrl = element.src;
+  } else if (element.style && element.style.backgroundImage) {
+    const match = element.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
+    if (match && match[1]) {
+      currentUrl = match[1];
+      isBackgroundImage = true;
+    }
+  }
+
+  if (!currentUrl || !currentUrl.includes("i.ytimg.com/vi/")) return;
+
+  const videoId = extractVideoIdFromThumbnailUrl(currentUrl);
   if (!videoId) return;
 
-  // Check if already upgraded
-  if (imgElement.hasAttribute("data-hq-upgraded")) return;
+  if (element.getAttribute("data-hq-upgraded") === videoId) return;
 
-  // Extract current quality level from URL
-  const currentQuality = imgElement.src.match(
+  const currentQuality = currentUrl.match(
     /\/(maxresdefault|sddefault|hqdefault|mqdefault|default)\.jpg/,
   )
     ? RegExp.$1
     : "default";
 
-  // Don't attempt to upgrade if already at maxres or if it's a non-standard format
-  if (currentQuality === "maxresdefault") return;
+  const cachedQuality = qualityCache.get(videoId);
 
-  const queryArgs = imgElement.src.split("?")[1] || "";
+  // If the DOM element is already displaying the correct cached quality, lock it and stop
+  if (cachedQuality && currentQuality + ".jpg" === cachedQuality) {
+    element.setAttribute("data-hq-upgraded", videoId);
+    return;
+  }
 
-  // Build fallback chain starting from current quality, going up
-  const qualityLevels = THUMBNAIL_URLS;
-  const currentIndex = qualityLevels.indexOf(currentQuality + ".jpg");
+  const queryArgs = currentUrl.split("?")[1] || "";
+  element.setAttribute("data-hq-upgraded", videoId);
 
-  // Only upgrade if current quality is below maxres (i.e., not already at highest)
-  const startIndex = Math.max(
-    0,
-    currentIndex >= 0 ? currentIndex : qualityLevels.length - 1,
-  );
-  const upgradedChain = qualityLevels.slice(0, startIndex + 1);
-
-  // Set primary image to maxres with fallback chain
-  const newUrl = `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg${queryArgs ? `?${queryArgs}` : ""}`;
-  imgElement.src = newUrl;
-
-  // Set srcset with fallback chain (in case maxres doesn't exist)
-  const srcset = upgradedChain
-    .map(
-      (filename, index) =>
-        `https://i.ytimg.com/vi/${videoId}/${filename}${queryArgs ? `?${queryArgs}` : ""} ${(index + 1) * 100}w`,
-    )
-    .join(", ");
-  imgElement.srcset = srcset;
-
-  // Add error handler to fallback to original quality if maxres doesn't exist
-  imgElement.onerror = function () {
-    // If maxres fails, try sddefault
-    if (this.src.includes("maxresdefault")) {
-      this.src = `https://i.ytimg.com/vi/${videoId}/sddefault.jpg${queryArgs ? `?${queryArgs}` : ""}`;
-      this.onerror = null; // Prevent infinite loop
+  const applyFinalQuality = (qualityName) => {
+    const finalUrl = `https://i.ytimg.com/vi/${videoId}/${qualityName}${queryArgs ? `?${queryArgs}` : ""}`;
+    if (isBackgroundImage) {
+      element.style.backgroundImage = `url("${finalUrl}")`;
+    } else {
+      element.removeAttribute("srcset");
+      element.src = finalUrl;
     }
   };
 
-  // Mark as upgraded to avoid reprocessing
-  imgElement.setAttribute("data-hq-upgraded", "true");
+  // 1. Check Synchronous Cache (Solves the Search Enter overwrite bug)
+  if (cachedQuality) {
+    applyFinalQuality(cachedQuality);
+    return;
+  }
+
+  // 2. Duplicate Image Check (Asynchronous)
+  const maxresUrl = `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg${queryArgs ? `?${queryArgs}` : ""}`;
+
+  const tester = new Image();
+  tester.onload = function () {
+    if (this.naturalWidth === 120 && this.naturalHeight === 90) {
+      qualityCache.set(videoId, "hqdefault.jpg");
+      applyFinalQuality("hqdefault.jpg");
+    } else {
+      qualityCache.set(videoId, "maxresdefault.jpg");
+      applyFinalQuality("maxresdefault.jpg");
+    }
+  };
+  tester.onerror = function () {
+    qualityCache.set(videoId, "hqdefault.jpg");
+    applyFinalQuality("hqdefault.jpg");
+  };
+  tester.src = maxresUrl;
 }
 
 function initFocusObserver() {
@@ -88,61 +104,71 @@ function initFocusObserver() {
     subtree: true,
     childList: true,
     attributes: true,
-    attributeFilter: ["class", "src"],
+    attributeFilter: ["class", "src", "srcset", "style"],
   };
 
   const observer = new MutationObserver((mutations) => {
     mutations.forEach((mutation) => {
-      // Check if mutation involves focus state
+      const element = mutation.target;
+
+      const findTargetsAndUpgrade = (container) => {
+        const img = container.querySelector("img");
+        if (img) upgradeThumbnailQuality(img);
+
+        const bgElements = container.querySelectorAll(
+          '[style*="background-image"]',
+        );
+        bgElements.forEach(upgradeThumbnailQuality);
+
+        if (container.style && container.style.backgroundImage) {
+          upgradeThumbnailQuality(container);
+        }
+      };
+
       if (
         mutation.type === "attributes" &&
         mutation.attributeName === "class"
       ) {
-        const element = mutation.target;
-
-        // Look for focused tile and upgrade its thumbnail
         if (element.classList?.contains("zylon-focus")) {
-          const tileContainer =
-            element.closest('[class*="tileRenderer"]') || element;
-          const imgElement = tileContainer.querySelector("img");
-
-          if (imgElement && !imgElement.hasAttribute("data-hq-upgraded")) {
-            upgradeThumbnailQuality(imgElement);
-          }
+          findTargetsAndUpgrade(element);
         }
       }
 
-      // Also catch newly inserted img elements in focused containers
+      // Automatically strip locks when YouTube's SPA overwrites the attributes natively
+      if (
+        mutation.type === "attributes" &&
+        ["src", "srcset", "style"].includes(mutation.attributeName)
+      ) {
+        const focusedParent = element.closest(".zylon-focus");
+        if (focusedParent) {
+          element.removeAttribute("data-hq-upgraded");
+          upgradeThumbnailQuality(element);
+        }
+      }
+
       if (mutation.type === "childList") {
         mutation.addedNodes.forEach((node) => {
-          if (node.nodeType !== 1) return; // Skip non-element nodes
+          if (node.nodeType !== 1) return;
+          const focusedParent = node.classList?.contains("zylon-focus")
+            ? node
+            : node.closest(".zylon-focus");
 
-          const imgElement =
-            node.tagName === "IMG" ? node : node.querySelector?.("img");
-
-          if (imgElement && !imgElement.hasAttribute("data-hq-upgraded")) {
-            const focusedParent = imgElement.closest(".zylon-focus");
-            if (focusedParent) {
-              upgradeThumbnailQuality(imgElement);
-            }
+          if (focusedParent) {
+            findTargetsAndUpgrade(focusedParent);
+          } else if (node.querySelectorAll) {
+            const focusedChildren = node.querySelectorAll(".zylon-focus");
+            focusedChildren.forEach(findTargetsAndUpgrade);
           }
         });
       }
     });
   });
 
-  // Start observing the main video container
-  const container = document.getElementById("container");
-  if (container) {
-    observer.observe(container, observerConfig);
-  } else {
-    // Fallback to body if container not found
-    observer.observe(document.body, observerConfig);
-  }
+  const container = document.getElementById("container") || document.body;
+  observer.observe(container, observerConfig);
 
   return observer;
 }
-
 // Initialize when DOM is ready
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", () => {
