@@ -24,7 +24,7 @@ const defaultConfig = {
   enableChapters: true,
   enableLongPress: true,
   enableShorts: true,
-  enablePremiumLogo: true,
+  enablePremiumLogo: false,
   dontCheckUpdateUntil: 0,
   enableWhoIsWatchingMenu: false,
   permanentlyEnableWhoIsWatchingMenu: false,
