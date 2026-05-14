@@ -3,15 +3,19 @@
 // At function call, get it from window
 const resolveCommand =
   window._yttv_resolveCommand ||
-  Object.values(window._yttv).find((a) => a.instance?.resolveCommand)?.instance
-    ?.resolveCommand;
+  (window._yttv
+    ? Object.values(window._yttv).find((a) => a && a.instance?.resolveCommand)
+        ?.instance?.resolveCommand
+    : null);
 window.isPipPlaying = false;
 let PlayerService = null;
 let observerPipEnter = null;
 
 function pipLoad() {
   try {
-    const mappings = Object.values(window._yttv).find((a) => a && a.mappings);
+    const mappings = window._yttv
+      ? Object.values(window._yttv).find((a) => a && a.mappings)
+      : null;
     if (!mappings) return;
 
     PlayerService = mappings.get("PlayerService");
@@ -168,9 +172,11 @@ function initPipObserver() {
       const voiceButton = searchBar.querySelector("ytlr-search-voice");
       if (!voiceButton) return;
 
-      const iconClassNames = Object.values(window._yttv).find(
-        (a) => a instanceof Map && a.has("CLEAR_COOKIES"),
-      );
+      const iconClassNames = window._yttv
+        ? Object.values(window._yttv).find(
+            (a) => a instanceof Map && a.has("CLEAR_COOKIES"),
+          )
+        : null;
       if (!iconClassNames) return;
 
       const iconClassToBeRemoved = iconClassNames.get("MICROPHONE_ON");

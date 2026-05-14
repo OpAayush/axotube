@@ -4,3 +4,4 @@ node_modules/
 .sign
 package-lock.json
 .history
+.npmrc

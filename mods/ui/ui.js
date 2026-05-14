@@ -13,6 +13,12 @@ let keyTimeout = null;
 
 function execute_once_dom_loaded() {
   if (initialized) return;
+
+  // Wait for basic DOM to be ready
+  if (!document.body || !window._yttv) {
+    return;
+  }
+
   initialized = true;
 
   const existingStyle = document.querySelector("style[nonce]");
@@ -85,12 +91,36 @@ function execute_once_dom_loaded() {
   );
 
   try {
-    uiContainer.innerHTML = `
-<h1>TizenTube Theme Configuration</h1>
-<label for="__barColor">Navigation Bar Color: <input type="text" id="__barColor"/></label>
-<label for="__routeColor">Main Content Color: <input type="text" id="__routeColor"/></label>
-<div><small>Sponsor segments skipping - https://sponsor.ajay.app</small></div>
-`;
+    // Create elements instead of using innerHTML to avoid TrustedHTML issues
+    const h1 = document.createElement("h1");
+    h1.textContent = "TizenTube Theme Configuration";
+
+    const label1 = document.createElement("label");
+    label1.setAttribute("for", "__barColor");
+    label1.textContent = "Navigation Bar Color: ";
+    const input1 = document.createElement("input");
+    input1.type = "text";
+    input1.id = "__barColor";
+    label1.appendChild(input1);
+
+    const label2 = document.createElement("label");
+    label2.setAttribute("for", "__routeColor");
+    label2.textContent = "Main Content Color: ";
+    const input2 = document.createElement("input");
+    input2.type = "text";
+    input2.id = "__routeColor";
+    label2.appendChild(input2);
+
+    const div = document.createElement("div");
+    const small = document.createElement("small");
+    small.textContent = "Sponsor segments skipping - https://sponsor.ajay.app";
+    div.appendChild(small);
+
+    uiContainer.appendChild(h1);
+    uiContainer.appendChild(label1);
+    uiContainer.appendChild(label2);
+    uiContainer.appendChild(div);
+
     document.querySelector("body").appendChild(uiContainer);
 
     uiContainer.querySelector("#__barColor").value = configRead(
@@ -117,7 +147,8 @@ function execute_once_dom_loaded() {
         }
       });
   } catch (e) {
-    console.warn("Could not create UI container:", e);
+    // Silently fail if UI container setup fails
+    // This can happen if YouTube TV hasn't fully initialized
   }
 
   var eventHandler = (evt) => {
