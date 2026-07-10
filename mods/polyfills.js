@@ -3,6 +3,7 @@
  *
  * Covers APIs that core-js does NOT polyfill (DOM/browser-runtime APIs):
  *   • globalThis
+ *   • NodeList.forEach / HTMLCollection.forEach
  *   • EventTarget (constructable)   ← used by config.js: new EventTarget()
  *   • AbortController / AbortSignal ← used by adblock.js fetch timeout
  *   • CustomEvent (constructable)   ← used by config.js: new CustomEvent(…)
@@ -42,51 +43,70 @@
 }());
 
 // ─────────────────────────────────────────────────────────────────────────────
-// EventTarget – constructable polyfill
-// Older Cobalt/Tizen ships EventTarget as a non-constructable interface.
-// config.js does:  export const configChangeEmitter = new EventTarget();
+// NodeList.forEach / HTMLCollection.forEach
+// Chrome 47 (Tizen 4) does not have these; they were added in Chrome 51.
 // ─────────────────────────────────────────────────────────────────────────────
 (function () {
-  // 1. Already constructable? → nothing to do.
-  if (typeof EventTarget !== 'undefined') {
-    try { new EventTarget(); return; } catch (_e) { /* fall through */ }
+  if (window.NodeList && !NodeList.prototype.forEach) {
+    NodeList.prototype.forEach = Array.prototype.forEach;
   }
-
-  // 2. Build a minimal constructable EventTarget.
-  function EventTargetPolyfill() {
-    Object.defineProperty(this, '_etMap', {
-      value: Object.create(null),
-      writable: false,
-      configurable: true,
-      enumerable: false
-    });
+  if (window.HTMLCollection && !HTMLCollection.prototype.forEach) {
+    HTMLCollection.prototype.forEach = Array.prototype.forEach;
   }
+}());
 
-  EventTargetPolyfill.prototype.addEventListener = function (type, cb) {
-    if (typeof cb !== 'function') return;
-    if (!this._etMap[type]) this._etMap[type] = [];
-    if (this._etMap[type].indexOf(cb) === -1) this._etMap[type].push(cb);
-  };
-
-  EventTargetPolyfill.prototype.removeEventListener = function (type, cb) {
-    var list = this._etMap[type];
-    if (!list) return;
-    var idx = list.indexOf(cb);
-    if (idx !== -1) list.splice(idx, 1);
-  };
-
-  EventTargetPolyfill.prototype.dispatchEvent = function (event) {
-    var list = this._etMap[event && event.type];
-    if (list) {
-      var snap = list.slice();
-      for (var i = 0; i < snap.length; i++) {
-        try { snap[i].call(this, event); } catch (err) { console.error(err); }
-      }
+// ─────────────────────────────────────────────────────────────────────────────
+// EventTarget – Safe Constructable Polyfill
+// Older Cobalt/Tizen ships EventTarget as a non-constructable interface.
+// config.js does:  export const configChangeEmitter = new EventTarget();
+//
+// IMPORTANT: If EventTarget exists natively we must NOT replace it entirely,
+// because it is the foundation of the DOM prototype chain (Node, Element, etc.
+// inherit from it).  Replacing it destroys instanceof checks and causes
+// "Illegal Invocation" crashes in YouTube's core routing logic.
+// Instead, we return a plain-object facade that implements the same API.
+// ─────────────────────────────────────────────────────────────────────────────
+(function () {
+  var NativeEventTarget = window.EventTarget;
+  if (typeof NativeEventTarget !== 'undefined') {
+    try {
+      new NativeEventTarget();
+      return; // Already constructable – nothing to do
+    } catch (_e) {
+      /* Exists but throws on new.  Apply non-destructive facade. */
     }
-    return !(event && event.defaultPrevented);
+  }
+
+  window.EventTarget = function EventTargetFacade() {
+    var listeners = {};
+    return {
+      addEventListener: function (type, cb) {
+        if (typeof cb !== 'function') return;
+        if (!listeners[type]) listeners[type] = [];
+        if (listeners[type].indexOf(cb) === -1) listeners[type].push(cb);
+      },
+      removeEventListener: function (type, cb) {
+        var list = listeners[type];
+        if (!list) return;
+        var idx = list.indexOf(cb);
+        if (idx !== -1) list.splice(idx, 1);
+      },
+      dispatchEvent: function (event) {
+        var list = listeners[event && event.type];
+        if (list) {
+          var snap = list.slice();
+          for (var i = 0; i < snap.length; i++) {
+            try { snap[i].call(this, event); } catch (err) { console.error(err); }
+          }
+        }
+        return !(event && event.defaultPrevented);
+      }
+    };
   };
 
-  window.EventTarget = EventTargetPolyfill;
+  if (NativeEventTarget) {
+    window.EventTarget.prototype = NativeEventTarget.prototype;
+  }
 }());
 
 // ─────────────────────────────────────────────────────────────────────────────

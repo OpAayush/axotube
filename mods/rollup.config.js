@@ -4,15 +4,11 @@ import getBabelOutputPlugin from "@rollup/plugin-babel";
 import { nodeResolve } from "@rollup/plugin-node-resolve";
 import commonjs from "@rollup/plugin-commonjs";
 import json from "@rollup/plugin-json";
+import replace from "@rollup/plugin-replace";
 
 export default {
   input: "userScript.js",
-  output: {
-    file: "../dist/userScript.js",
-    format: "iife",
-    intro: "try {",
-    outro: "} catch(e) { var d=document.createElement('div'); d.style.cssText='position:fixed;top:0;left:0;right:0;z-index:999999;background:red;color:white;font-size:20px;padding:20px;font-family:monospace;white-space:pre-wrap;'; d.textContent='TT ERROR: '+e.message+' at '+e.fileName+':'+e.lineNumber; document.body.appendChild(d); }",
-  },
+  output: { file: "../dist/userScript.js", format: "iife" },
   plugins: [
     json(),
 
@@ -33,7 +29,6 @@ export default {
     }),
 
     getBabelOutputPlugin({
-      babelHelpers: "bundled",
       presets: [
         [
           "@babel/preset-env",
@@ -45,17 +40,12 @@ export default {
             // useBuiltIns is intentionally NOT set here – polyfills are
             // injected via explicit 'core-js/stable' + 'regenerator-runtime'
             // imports in userScript.js and bundled by rollup before this
-            // output plugin runs.  Setting useBuiltIns: "entry" in an
-            // *output* plugin has no effect because import statements are
-            // already resolved by the time babel sees the bundle.
+            // output plugin runs.
             modules: false,
 
             // Explicitly include transforms that must fire for Tizen 4:
             include: [
               // async/await  →  _asyncToGenerator + generator syntax
-              // (generators ARE supported in Chrome 39+, so no regenerator
-              //  wrapper is emitted; the regenerator-runtime import is a
-              //  safety net for edge-case Cobalt builds that lack generators)
               "@babel/plugin-transform-async-to-generator",
               // Class fields, private methods, etc.
               "@babel/plugin-transform-class-properties",
@@ -92,6 +82,13 @@ export default {
       compress: {
         passes: 1, // Conservative compression to avoid breaking old engines
       },
+    }),
+
+    // Terser/Babel can emit \uFFFF sequences that old V8/Cobalt engines
+    // treat as invalid tokens, preventing the entire bundle from parsing.
+    replace({
+      preventAssignment: true,
+      "\uFFFF": "\u0000",
     }),
   ],
 };

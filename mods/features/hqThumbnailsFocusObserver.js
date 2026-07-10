@@ -3,7 +3,7 @@
 
 import { configRead } from "../config.js";
 
-const THUMBNAIL_URLS = [
+var THUMBNAIL_URLS = [
   "maxresdefault.jpg",
   "sddefault.jpg",
   "hqdefault.jpg",
@@ -13,184 +13,184 @@ const THUMBNAIL_URLS = [
 
 function extractVideoIdFromThumbnailUrl(url) {
   if (!url) return null;
-  // Only process standard YouTube video thumbnails (i.ytimg.com/vi/...)
-  // Ignore playlist, channel, and mix thumbnails from other CDNs
   if (!url.includes("i.ytimg.com/vi/")) return null;
 
-  const match = url.match(/\/vi\/([a-zA-Z0-9_-]+)\//);
+  var match = url.match(/\/vi\/([a-zA-Z0-9_-]+)\//);
   return match ? match[1] : null;
-} // Global cache to prevent SPA DOM revert flickering
-const qualityCache = new Map();
+}
+
+var qualityCache = {};
 
 function upgradeThumbnailQuality(element) {
   if (!configRead("enableHqThumbnails")) return;
   if (!element) return;
 
-  let currentUrl = "";
-  let isBackgroundImage = false;
+  var currentUrl = "";
+  var isBackgroundImage = false;
 
   if (element.tagName === "IMG" && element.src) {
     currentUrl = element.src;
   } else if (element.style && element.style.backgroundImage) {
-    const match = element.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
-    if (match && match[1]) {
-      currentUrl = match[1];
+    var bgMatch = element.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
+    if (bgMatch && bgMatch[1]) {
+      currentUrl = bgMatch[1];
       isBackgroundImage = true;
     }
   }
 
   if (!currentUrl || !currentUrl.includes("i.ytimg.com/vi/")) return;
 
-  const videoId = extractVideoIdFromThumbnailUrl(currentUrl);
+  var videoId = extractVideoIdFromThumbnailUrl(currentUrl);
   if (!videoId) return;
 
   if (element.getAttribute("data-hq-upgraded") === videoId) return;
 
-  const qualityMatch = currentUrl.match(
-    /\/(maxresdefault|sddefault|hqdefault|mqdefault|default)\.jpg/,
+  var qualityMatch = currentUrl.match(
+    /\/(maxresdefault|sddefault|hqdefault|mqdefault|default)\.jpg/
   );
-  const currentQuality = qualityMatch ? qualityMatch[1] : "default";
+  var currentQuality = qualityMatch ? qualityMatch[1] : "default";
+  var cachedQuality = qualityCache[videoId];
 
-  const cachedQuality = qualityCache.get(videoId);
-
-  // If the DOM element is already displaying the correct cached quality, lock it and stop
   if (cachedQuality && currentQuality + ".jpg" === cachedQuality) {
     element.setAttribute("data-hq-upgraded", videoId);
     return;
   }
 
-  const queryArgs = currentUrl.split("?")[1] || "";
+  var queryArgs = currentUrl.split("?")[1] || "";
   element.setAttribute("data-hq-upgraded", videoId);
 
-  const applyFinalQuality = (qualityName) => {
-    const finalUrl = `https://i.ytimg.com/vi/${videoId}/${qualityName}${queryArgs ? `?${queryArgs}` : ""}`;
+  var applyFinalQuality = function (qualityName) {
+    var finalUrl = "https://i.ytimg.com/vi/" + videoId + "/" + qualityName + (queryArgs ? "?" + queryArgs : "");
     if (isBackgroundImage) {
-      element.style.backgroundImage = `url("${finalUrl}")`;
+      element.style.backgroundImage = 'url("' + finalUrl + '")';
     } else {
       element.removeAttribute("srcset");
       element.src = finalUrl;
     }
   };
 
-  // 1. Check Synchronous Cache (Solves the Search Enter overwrite bug)
   if (cachedQuality) {
     applyFinalQuality(cachedQuality);
     return;
   }
 
-  // 2. Duplicate Image Check (Asynchronous)
-  const maxresUrl = `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg${queryArgs ? `?${queryArgs}` : ""}`;
+  var maxresUrl = "https://i.ytimg.com/vi/" + videoId + "/maxresdefault.jpg" + (queryArgs ? "?" + queryArgs : "");
 
-  const tester = new Image();
+  var tester = new Image();
   tester.onload = function () {
     if (this.naturalWidth === 120 && this.naturalHeight === 90) {
-      qualityCache.set(videoId, "hqdefault.jpg");
+      qualityCache[videoId] = "hqdefault.jpg";
       applyFinalQuality("hqdefault.jpg");
     } else {
-      qualityCache.set(videoId, "maxresdefault.jpg");
+      qualityCache[videoId] = "maxresdefault.jpg";
       applyFinalQuality("maxresdefault.jpg");
     }
   };
   tester.onerror = function () {
-    qualityCache.set(videoId, "hqdefault.jpg");
+    qualityCache[videoId] = "hqdefault.jpg";
     applyFinalQuality("hqdefault.jpg");
   };
   tester.src = maxresUrl;
 }
 
 function initFocusObserver() {
-  const observerConfig = {
+  var observerConfig = {
     subtree: true,
     childList: true,
     attributes: true,
     attributeFilter: ["class", "src", "srcset", "style"],
   };
 
-  const observer = new MutationObserver((mutations) => {
-    mutations.forEach((mutation) => {
-      const element = mutation.target;
+  var observer = new MutationObserver(function (mutations) {
+    try {
+      for (var m = 0; m < mutations.length; m++) {
+        var mutation = mutations[m];
+        var element = mutation.target;
 
-      const findTargetsAndUpgrade = (container) => {
-        const img = container.querySelector("img");
-        if (img) upgradeThumbnailQuality(img);
+        var findTargetsAndUpgrade = function (container) {
+          if (!container || !container.querySelector) return;
+          var img = container.querySelector("img");
+          if (img) upgradeThumbnailQuality(img);
 
-        const bgElements = container.querySelectorAll(
-          '[style*="background-image"]',
-        );
-        bgElements.forEach(upgradeThumbnailQuality);
-
-        if (container.style && container.style.backgroundImage) {
-          upgradeThumbnailQuality(container);
-        }
-      };
-
-      if (
-        mutation.type === "attributes" &&
-        mutation.attributeName === "class"
-      ) {
-        if (element.classList?.contains("zylon-focus")) {
-          findTargetsAndUpgrade(element);
-        }
-      }
-
-      // Automatically strip locks when YouTube's SPA overwrites the attributes natively
-      if (
-        mutation.type === "attributes" &&
-        ["src", "srcset", "style"].includes(mutation.attributeName)
-      ) {
-        const focusedParent = element.closest(".zylon-focus");
-        if (focusedParent) {
-          const lockedVideoId = element.getAttribute("data-hq-upgraded");
-
-          let liveUrl = "";
-          if (element.tagName === "IMG") {
-            liveUrl = element.src;
-          } else if (element.style?.backgroundImage) {
-            liveUrl =
-              (element.style.backgroundImage.match(
-                /url\(['"]?(.*?)['"]?\)/,
-              ) || [])[1] || "";
-          }
-          const liveVideoId = liveUrl
-            ? extractVideoIdFromThumbnailUrl(liveUrl)
-            : null;
-
-          if (lockedVideoId && lockedVideoId === liveVideoId) {
-            return;
+          var bgElements = container.querySelectorAll('[style*="background-image"]');
+          for (var b = 0; b < bgElements.length; b++) {
+            upgradeThumbnailQuality(bgElements[b]);
           }
 
-          element.removeAttribute("data-hq-upgraded");
-          upgradeThumbnailQuality(element);
+          if (container.style && container.style.backgroundImage) {
+            upgradeThumbnailQuality(container);
+          }
+        };
+
+        if (mutation.type === "attributes" && mutation.attributeName === "class") {
+          if (element.classList && element.classList.contains("zylon-focus")) {
+            findTargetsAndUpgrade(element);
+          }
         }
-      }
 
-      if (mutation.type === "childList") {
-        mutation.addedNodes.forEach((node) => {
-          if (node.nodeType !== 1) return;
-          const focusedParent = node.classList?.contains("zylon-focus")
-            ? node
-            : node.closest(".zylon-focus");
-
+        if (
+          mutation.type === "attributes" &&
+          (mutation.attributeName === "src" || mutation.attributeName === "srcset" || mutation.attributeName === "style")
+        ) {
+          var focusedParent = element.closest ? element.closest(".zylon-focus") : null;
           if (focusedParent) {
-            findTargetsAndUpgrade(focusedParent);
-          } else if (node.querySelectorAll) {
-            const focusedChildren = node.querySelectorAll(".zylon-focus");
-            focusedChildren.forEach(findTargetsAndUpgrade);
+            var lockedVideoId = element.getAttribute("data-hq-upgraded");
+
+            var liveUrl = "";
+            if (element.tagName === "IMG") {
+              liveUrl = element.src;
+            } else if (element.style && element.style.backgroundImage) {
+              var liveMatch = element.style.backgroundImage.match(/url\(['"]?(.*?)['"]?\)/);
+              liveUrl = liveMatch ? liveMatch[1] : "";
+            }
+            var liveVideoId = liveUrl ? extractVideoIdFromThumbnailUrl(liveUrl) : null;
+
+            if (lockedVideoId && lockedVideoId === liveVideoId) {
+              continue;
+            }
+
+            element.removeAttribute("data-hq-upgraded");
+            upgradeThumbnailQuality(element);
           }
-        });
+        }
+
+        if (mutation.type === "childList") {
+          for (var n = 0; n < mutation.addedNodes.length; n++) {
+            var node = mutation.addedNodes[n];
+            if (node.nodeType !== 1) continue;
+
+            var focusedParentNode = null;
+            if (node.classList && node.classList.contains("zylon-focus")) {
+              focusedParentNode = node;
+            } else if (node.closest) {
+              focusedParentNode = node.closest(".zylon-focus");
+            }
+
+            if (focusedParentNode) {
+              findTargetsAndUpgrade(focusedParentNode);
+            } else if (node.querySelectorAll) {
+              var focusedChildren = node.querySelectorAll(".zylon-focus");
+              for (var c = 0; c < focusedChildren.length; c++) {
+                findTargetsAndUpgrade(focusedChildren[c]);
+              }
+            }
+          }
+        }
       }
-    });
+    } catch (err) {
+      console.error("TT Error in hqObserver:", err);
+    }
   });
 
-  const container = document.getElementById("container") || document.body;
+  var container = document.getElementById("container") || document.body;
   observer.observe(container, observerConfig);
 
   return observer;
 }
-// Initialize when DOM is ready
+
 if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", () => {
-    setTimeout(initFocusObserver, 1000); // Delay to ensure YouTube TV is initialized
+  document.addEventListener("DOMContentLoaded", function () {
+    setTimeout(initFocusObserver, 1000);
   });
 } else {
   setTimeout(initFocusObserver, 1000);
