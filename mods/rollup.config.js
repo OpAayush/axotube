@@ -7,7 +7,12 @@ import json from "@rollup/plugin-json";
 
 export default {
   input: "userScript.js",
-  output: { file: "../dist/userScript.js", format: "iife" },
+  output: {
+    file: "../dist/userScript.js",
+    format: "iife",
+    intro: "try {",
+    outro: "} catch(e) { var d=document.createElement('div'); d.style.cssText='position:fixed;top:0;left:0;right:0;z-index:999999;background:red;color:white;font-size:20px;padding:20px;font-family:monospace;white-space:pre-wrap;'; d.textContent='TT ERROR: '+e.message+' at '+e.fileName+':'+e.lineNumber; document.body.appendChild(d); }",
+  },
   plugins: [
     json(),
 
