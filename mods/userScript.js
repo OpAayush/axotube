@@ -2,29 +2,21 @@
  * userScript.js – TizenTube entry point.
  *
  * Import order matters for Tizen 4 (N5470 / Cobalt) compatibility:
- *  1. core-js/stable  – polyfills for ALL stable ES built-ins (Array, Object,
- *                       String, Promise, Map, Set, Symbol, …)
- *  2. regenerator-runtime – makes async / await work after Babel transforms
- *                           them to generator code on pre-ES2017 engines
- *  3. polyfills.js    – browser-API polyfills NOT covered by core-js
- *                       (EventTarget ctor, AbortController, CustomEvent, etc.)
- *  4. whatwg-fetch    – fetch() polyfill
- *  5. app modules     – everything else
+ *  1. core-js/stable  – polyfills for ES built-ins not natively available
+ *                       in Chromium 47 (Array.flat, Object.fromEntries, …)
+ *  2. polyfills.js    – browser-API polyfills NOT covered by core-js
+ *                       (EventTarget ctor, AbortController, CustomEvent, …)
+ *  3. whatwg-fetch    – fetch() polyfill
+ *  4. app modules     – everything else
  */
 
-// ── 1. core-js: full ES stable polyfill suite ─────────────────────────────────
-// Replaces the old narrow import: 'core-js/proposals/object-getownpropertydescriptors'
-// Covers: Array.flat/flatMap, Object.entries/values/fromEntries,
-//         String.replaceAll, Promise.finally/allSettled, Map, Set, Symbol, …
+// ── 1. core-js: polyfills needed for Chrome 47 ───────────────────────────────
 import 'core-js/stable';
 
-// ── 2. Async / await runtime (needed by sponsorblock.js, updater.js, etc.) ────
-import 'regenerator-runtime/runtime';
-
-// ── 3. Browser-API polyfills (EventTarget ctor, AbortController, …) ───────────
+// ── 2. Browser-API polyfills (EventTarget ctor, AbortController, …) ───────────
 import './polyfills.js';
 
-// ── 4. Fetch polyfill ─────────────────────────────────────────────────────────
+// ── 3. Fetch polyfill ─────────────────────────────────────────────────────────
 import 'whatwg-fetch';
 
 // ── 5. Application modules ────────────────────────────────────────────────────

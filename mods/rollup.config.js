@@ -22,20 +22,20 @@ export default {
     }),
 
     commonjs({
-      // Include node_modules AND our own mods folder (needed for core-js, regenerator-runtime)
+      // Include node_modules AND our own mods folder (needed for core-js)
       include: [/node_modules/, /mods/],
-      exclude: ["**/regenerator-runtime/**"],
       transformMixedEsModules: true,
     }),
 
     getBabelOutputPlugin({
+      babelHelpers: "bundled",
       presets: [
         [
           "@babel/preset-env",
           {
-            // Target very old Cobalt / Tizen 4 WebKit
+            // Target Tizen 4 (N5470) Cobalt / Chromium 47
             targets: {
-              browsers: ["Chrome 40", "Safari 9", "IE 11"],
+              browsers: ["Chrome 47"],
             },
             // useBuiltIns is intentionally NOT set here – polyfills are
             // injected via explicit 'core-js/stable' + 'regenerator-runtime'
@@ -73,7 +73,6 @@ export default {
       ecma: 5, // Output ES5 for maximum Tizen 4 compatibility
       mangle: {
         reserved: [
-          "regeneratorRuntime", // ← must not be mangled; async/await uses it
           "h5vcc",
           "_yttv",
           "localStorage",
