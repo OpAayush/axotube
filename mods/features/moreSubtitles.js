@@ -210,7 +210,7 @@ function patchSubtitleMenu() {
         yttvInstance.instance.resolveCommand.isPatchedBySubtitleLocalization
     ) {
         if (!yttvInstance) {
-            console.error(
+            console.warn(
                 "TizenTube Subtitle Localization: Could not find resolveCommand instance."
             );
         } else {
@@ -359,10 +359,12 @@ function patchSubtitleMenu() {
 }
 
 // Wait for the YouTube TV app to be ready
+let subtitlePollCount = 0;
+const SUBTITLE_POLL_LIMIT = 30;
 const interval = setInterval(() => {
     if (window._yttv && Object.keys(window._yttv).length > 0) {
         patchSubtitleMenu();
-        clearInterval(interval);
+        if (isPatched || ++subtitlePollCount >= SUBTITLE_POLL_LIMIT) clearInterval(interval);
     }
 }, 1000);
 

@@ -3,7 +3,6 @@ import terser from "@rollup/plugin-terser";
 import getBabelOutputPlugin from "@rollup/plugin-babel";
 import { nodeResolve } from "@rollup/plugin-node-resolve";
 import commonjs from "@rollup/plugin-commonjs";
-import replace from "@rollup/plugin-replace";
 import json from "@rollup/plugin-json";
 
 export default {
@@ -16,12 +15,6 @@ export default {
       include: "**/*.css",
     }),
 
-    // Replace structuredClone with polyfill BEFORE babel processes it
-    replace({
-      structuredClone: "structuredClonePolyfill",
-      preventAssignment: true,
-    }),
-
     nodeResolve({
       browser: true,
       preferBuiltins: false,
@@ -30,6 +23,7 @@ export default {
     commonjs({
       // Include node_modules AND our own mods folder (needed for core-js, regenerator-runtime)
       include: [/node_modules/, /mods/],
+      exclude: ["**/regenerator-runtime/**"],
       transformMixedEsModules: true,
     }),
 
@@ -84,7 +78,6 @@ export default {
       ecma: 5, // Output ES5 for maximum Tizen 4 compatibility
       mangle: {
         reserved: [
-          "structuredClonePolyfill",
           "regeneratorRuntime", // ← must not be mangled; async/await uses it
           "h5vcc",
           "_yttv",
@@ -94,21 +87,6 @@ export default {
       compress: {
         passes: 1, // Conservative compression to avoid breaking old engines
       },
-    }),
-
-    // Inject structuredClone polyfill after all other transforms
-    replace({
-      structuredClonePolyfill: `(function() {
-        if (typeof structuredClone !== 'undefined') return structuredClone;
-        return function(obj) {
-          try {
-            return JSON.parse(JSON.stringify(obj));
-          } catch (e) {
-            return obj;
-          }
-        };
-      })()`,
-      preventAssignment: true,
     }),
   ],
 };

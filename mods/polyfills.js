@@ -322,3 +322,31 @@
                     return i > -1;
                   };
 }());
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Intl.Locale – minimal polyfill (Chrome 57 lacks it; ships natively Chrome 74+)
+// moreSubtitles.js only ever does: new Intl.Locale('und', { region }).maximize().language
+// This is NOT a spec-compliant Intl.Locale — it only supports that one call shape.
+// ─────────────────────────────────────────────────────────────────────────────
+(function () {
+  if (typeof Intl === 'undefined') return;
+  if (typeof Intl.Locale === 'function') return; // native support present
+
+  var REGION_TO_LANG = {
+    US: 'en', GB: 'en', AU: 'en', CA: 'en', IN: 'hi', IE: 'en', NZ: 'en',
+    FR: 'fr', DE: 'de', ES: 'es', IT: 'it', PT: 'pt', BR: 'pt', MX: 'es',
+    AR: 'es', CO: 'es', CL: 'es', RU: 'ru', UA: 'uk', PL: 'pl', NL: 'nl',
+    BE: 'nl', SE: 'sv', NO: 'no', DK: 'da', FI: 'fi', TR: 'tr', GR: 'el',
+    CZ: 'cs', SK: 'sk', HU: 'hu', RO: 'ro', BG: 'bg', HR: 'hr', RS: 'sr',
+    JP: 'ja', KR: 'ko', VN: 'vi', TH: 'th', ID: 'id', MY: 'ms', PH: 'tl',
+    SA: 'ar', AE: 'ar', EG: 'ar', IL: 'he', IR: 'fa', PK: 'ur', BD: 'bn', LK: 'si'
+  };
+
+  function IntlLocalePolyfill(tag, opts) {
+    opts = opts || {};
+    this.language = REGION_TO_LANG[opts.region] || 'en';
+  }
+  IntlLocalePolyfill.prototype.maximize = function () { return this; };
+
+  Intl.Locale = IntlLocalePolyfill;
+}());

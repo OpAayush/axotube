@@ -10,7 +10,14 @@ configChangeEmitter.addEventListener('configChange', (event) => {
 let interval;
 
 function disableWhosWatching(value) {
-    const LeanbackRecurringActions = JSON.parse(localStorage['yt.leanback.default::recurring_actions']);
+    const raw = localStorage['yt.leanback.default::recurring_actions'];
+    if (!raw) return;
+    let LeanbackRecurringActions;
+    try {
+        LeanbackRecurringActions = JSON.parse(raw);
+    } catch (e) {
+        return;
+    }
     const shouldPermanentlyEnable = configRead('permanentlyEnableWhoIsWatchingMenu');
     const date = new Date();
     if (!value) {

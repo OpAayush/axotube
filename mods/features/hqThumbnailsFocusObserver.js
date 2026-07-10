@@ -46,11 +46,10 @@ function upgradeThumbnailQuality(element) {
 
   if (element.getAttribute("data-hq-upgraded") === videoId) return;
 
-  const currentQuality = currentUrl.match(
+  const qualityMatch = currentUrl.match(
     /\/(maxresdefault|sddefault|hqdefault|mqdefault|default)\.jpg/,
-  )
-    ? RegExp.$1
-    : "default";
+  );
+  const currentQuality = qualityMatch ? qualityMatch[1] : "default";
 
   const cachedQuality = qualityCache.get(videoId);
 
@@ -141,6 +140,25 @@ function initFocusObserver() {
       ) {
         const focusedParent = element.closest(".zylon-focus");
         if (focusedParent) {
+          const lockedVideoId = element.getAttribute("data-hq-upgraded");
+
+          let liveUrl = "";
+          if (element.tagName === "IMG") {
+            liveUrl = element.src;
+          } else if (element.style?.backgroundImage) {
+            liveUrl =
+              (element.style.backgroundImage.match(
+                /url\(['"]?(.*?)['"]?\)/,
+              ) || [])[1] || "";
+          }
+          const liveVideoId = liveUrl
+            ? extractVideoIdFromThumbnailUrl(liveUrl)
+            : null;
+
+          if (lockedVideoId && lockedVideoId === liveVideoId) {
+            return;
+          }
+
           element.removeAttribute("data-hq-upgraded");
           upgradeThumbnailQuality(element);
         }
